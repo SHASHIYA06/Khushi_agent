@@ -5,7 +5,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useDropzone } from 'react-dropzone';
 import AppShell from '@/components/layout/AppShell';
 import useStore from '@/store/useStore';
-import { listFolders, createFolder, deleteFolder, listDocuments, uploadDocument, deleteDocument } from '@/lib/api';
+import { listFolders, createFolder, deleteFolder, listDocuments, uploadDocument, deleteDocument, syncDrive } from '@/lib/api';
 import {
     HiOutlineFolder, HiOutlineFolderAdd, HiOutlineDocumentText,
     HiOutlineTrash, HiOutlineUpload, HiOutlineX, HiOutlineEye,
@@ -20,6 +20,7 @@ export default function DocumentsPage() {
     const [uploadProgress, setUploadProgress] = useState('');
     const [previewDoc, setPreviewDoc] = useState(null);
     const [loading, setLoading] = useState(false);
+    const [syncing, setSyncing] = useState(false);
 
     useEffect(() => {
         loadData();
@@ -118,9 +119,29 @@ export default function DocumentsPage() {
                             Manage folders and upload electrical drawings
                         </p>
                     </div>
-                    <button onClick={loadData} className="btn-secondary">
-                        <HiOutlineRefresh size={16} /> Refresh
-                    </button>
+                    <div className="flex items-center gap-2">
+                        <button
+                            onClick={async () => {
+                                setSyncing(true);
+                                try {
+                                    const res = await syncDrive();
+                                    addNotification(`Drive synced: ${res.newFiles || 0} new files found`, 'success');
+                                    loadData();
+                                } catch (e) {
+                                    addNotification('Sync failed: ' + e.message, 'error');
+                                }
+                                setSyncing(false);
+                            }}
+                            className="btn-secondary"
+                            disabled={syncing}
+                        >
+                            <HiOutlineRefresh size={16} className={syncing ? 'animate-spin' : ''} />
+                            {syncing ? 'Syncing...' : 'Sync Drive'}
+                        </button>
+                        <button onClick={loadData} className="btn-secondary">
+                            <HiOutlineRefresh size={16} /> Refresh
+                        </button>
+                    </div>
                 </div>
 
                 {/* Folders Section */}

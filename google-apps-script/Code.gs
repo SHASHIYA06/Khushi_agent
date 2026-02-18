@@ -1,6 +1,15 @@
 // ============================================================
-// MetroCircuit AI Reviewer — Google Apps Script Backend
+// MetroCircuit AI Reviewer — Google Apps Script Backend v2.0
 // Deploy as Web App: Execute as Me, Access: Anyone
+// ============================================================
+// SETUP INSTRUCTIONS:
+// 1. Create new Apps Script project at script.google.com
+// 2. Replace the 4 constants below with your actual values
+// 3. Enable "Drive API" in Resources → Advanced Google Services
+// 4. Deploy → New Deployment → Web App
+//    - Execute as: Me
+//    - Who has access: Anyone
+// 5. Copy the deployment URL to your MetroCircuit Settings page
 // ============================================================
 
 const GEMINI_API_KEY = "PASTE_YOUR_GEMINI_API_KEY_HERE";
@@ -9,30 +18,73 @@ const SUPABASE_SERVICE_ROLE_KEY = "PASTE_YOUR_SUPABASE_SERVICE_ROLE_KEY_HERE";
 const DRIVE_FOLDER_ID = "PASTE_YOUR_DRIVE_FOLDER_ID_HERE";
 
 // ============================================================
-// ROUTING
+// REQUEST ROUTING (supports both GET and POST)
 // ============================================================
 
 function doPost(e) {
   try {
-    const data = JSON.parse(e.postData.contents);
-    
-    switch (data.action) {
-      case "upload": return uploadFile(data);
-      case "query": return handleQuery(data);
-      case "create_folder": return createFolder(data);
-      case "delete_folder": return deleteFolder(data);
-      case "list_folders": return listFolders();
-      case "list_documents": return listDocuments(data);
-      case "delete_document": return deleteDocument(data);
-      default: return jsonResponse({ error: "Unknown action" });
+    var data;
+    // Handle different content types from frontend
+    if (e.postData) {
+      data = JSON.parse(e.postData.contents);
+    } else {
+      return corsResponse({ error: "No data received" });
     }
+    return routeAction(data);
   } catch (err) {
-    return jsonResponse({ error: err.message });
+    Logger.log("doPost Error: " + err.message);
+    return corsResponse({ error: err.message, stack: err.stack });
   }
 }
 
 function doGet(e) {
-  return jsonResponse({ status: "MetroCircuit AI Backend is running" });
+  // Support GET-based calls (fallback for POST redirect issues)
+  var params = e.parameter;
+
+  if (params.action) {
+    try {
+      // For GET requests, action and simple params come as URL params
+      var data = {};
+      for (var key in params) {
+        data[key] = params[key];
+      }
+      return routeAction(data);
+    } catch (err) {
+      Logger.log("doGet Error: " + err.message);
+      return corsResponse({ error: err.message });
+    }
+  }
+
+  // Default: health check
+  return corsResponse({
+    status: "MetroCircuit AI Backend is running",
+    version: "2.0",
+    timestamp: new Date().toISOString()
+  });
+}
+
+function routeAction(data) {
+  switch (data.action) {
+    case "upload": return uploadFile(data);
+    case "query": return handleQuery(data);
+    case "create_folder": return createFolderAction(data);
+    case "delete_folder": return deleteFolderAction(data);
+    case "list_folders": return listFolders();
+    case "list_documents": return listDocuments(data);
+    case "delete_document": return deleteDocumentAction(data);
+    case "sync_drive": return syncDriveFiles();
+    case "health": return corsResponse({ status: "ok", version: "2.0" });
+    default: return corsResponse({ error: "Unknown action: " + data.action });
+  }
+}
+
+// ============================================================
+// CORS-SAFE JSON RESPONSE
+// ============================================================
+
+function corsResponse(data) {
+  return ContentService.createTextOutput(JSON.stringify(data))
+    .setMimeType(ContentService.MimeType.JSON);
 }
 
 // ============================================================
@@ -40,96 +92,220 @@ function doGet(e) {
 // ============================================================
 
 function uploadFile(data) {
-  // Decode base64 file and save to Drive
-  const blob = Utilities.newBlob(
-    Utilities.base64Decode(data.file),
-    data.mimeType,
-    data.fileName
+  Logger.log("Upload started: " + data.fileName);
+
+  // Validate required fields
+  if (!data.file || !data.fileName) {
+    return corsResponse({ error: "Missing file or fileName" });
+  }
+
+  try {
+    // Step 1: Decode base64 and save to Google Drive
+    var blob = Utilities.newBlob(
+      Utilities.base64Decode(data.file),
+      data.mimeType || "application/pdf",
+      data.fileName
+    );
+
+    var folder;
+    try {
+      folder = DriveApp.getFolderById(DRIVE_FOLDER_ID);
+    } catch (folderErr) {
+      return corsResponse({
+        error: "Invalid DRIVE_FOLDER_ID. Make sure it exists and is accessible. ID: " + DRIVE_FOLDER_ID
+      });
+    }
+
+    var file = folder.createFile(blob);
+    var fileId = file.getId();
+    file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+
+    Logger.log("File saved to Drive: " + fileId);
+
+    // Step 2: Register document in Supabase
+    var docId = data.documentId || Utilities.getUuid();
+    var docInsertResult = supabaseInsert("documents", {
+      id: docId,
+      name: data.fileName,
+      folder_id: data.folderId || null,
+      drive_file_id: fileId,
+      drive_preview_url: "https://drive.google.com/file/d/" + fileId + "/preview",
+      file_type: data.mimeType || "application/pdf",
+      file_size: blob.getBytes().length,
+      status: "processing"
+    });
+
+    Logger.log("Document registered in Supabase: " + JSON.stringify(docInsertResult));
+
+    // Step 3: Extract text from file
+    var text = extractTextFromFile(file, data.fileName, fileId);
+
+    if (!text || text.trim().length < 10) {
+      supabaseUpdate("documents", docId, { status: "error" });
+      return corsResponse({
+        status: "error",
+        message: "Could not extract text from file. Try uploading a text-based PDF.",
+        documentId: docId,
+        driveFileId: fileId
+      });
+    }
+
+    Logger.log("Extracted text length: " + text.length);
+
+    // Step 4: Smart engineering chunking
+    var chunks = engineeringChunk(text);
+    Logger.log("Created " + chunks.length + " chunks");
+
+    // Step 5: Process each chunk (extract components, embed, store)
+    var processedCount = 0;
+    for (var i = 0; i < chunks.length; i++) {
+      try {
+        var extraction = extractEngineeringData(chunks[i]);
+        var embedding = getGeminiEmbedding(chunks[i]);
+
+        supabaseInsert("chunks", {
+          document_id: docId,
+          content: chunks[i],
+          page_number: i + 1,
+          panel: extraction.panel || "",
+          voltage: extraction.voltage || "",
+          components: extraction.components || [],
+          connections: extraction.connections || [],
+          metadata: { chunk_index: i, total_chunks: chunks.length },
+          embedding: embedding
+        });
+        processedCount++;
+      } catch (chunkErr) {
+        Logger.log("Chunk " + i + " error: " + chunkErr.message);
+      }
+
+      // Avoid Apps Script timeout - add small delay every 5 chunks
+      if (i > 0 && i % 5 === 0) {
+        Utilities.sleep(500);
+      }
+    }
+
+    // Step 6: Update document status
+    supabaseUpdate("documents", docId, {
+      status: "indexed",
+      page_count: processedCount
+    });
+
+    Logger.log("Upload complete: " + processedCount + " chunks indexed");
+
+    return corsResponse({
+      status: "indexed",
+      documentId: docId,
+      driveFileId: fileId,
+      drivePreviewUrl: "https://drive.google.com/file/d/" + fileId + "/preview",
+      chunksProcessed: processedCount,
+      totalChunks: chunks.length
+    });
+
+  } catch (err) {
+    Logger.log("Upload Error: " + err.message + "\n" + err.stack);
+    return corsResponse({ error: "Upload failed: " + err.message });
+  }
+}
+
+// ============================================================
+// TEXT EXTRACTION (multi-strategy)
+// ============================================================
+
+function extractTextFromFile(file, fileName, fileId) {
+  var text = "";
+
+  // Strategy 1: Direct text extraction (txt, csv)
+  if (fileName.match(/\.(txt|csv|text)$/i)) {
+    try {
+      text = file.getBlob().getDataAsString();
+      if (text && text.trim().length > 10) return text;
+    } catch (e) {
+      Logger.log("Direct text extraction failed: " + e.message);
+    }
+  }
+
+  // Strategy 2: Google Drive OCR (PDF → Google Doc conversion)
+  try {
+    var ocrResource = {
+      title: fileName + "_ocr_temp",
+      mimeType: "application/vnd.google-apps.document",
+      parents: [{ id: DRIVE_FOLDER_ID }]
+    };
+
+    var ocrFile = Drive.Files.insert(ocrResource, file.getBlob(), {
+      ocr: true,
+      ocrLanguage: "en"
+    });
+
+    if (ocrFile && ocrFile.id) {
+      var doc = DocumentApp.openById(ocrFile.id);
+      text = doc.getBody().getText();
+      // Clean up temp file
+      DriveApp.getFileById(ocrFile.id).setTrashed(true);
+
+      if (text && text.trim().length > 10) {
+        Logger.log("OCR extraction successful: " + text.length + " chars");
+        return text;
+      }
+    }
+  } catch (e) {
+    Logger.log("OCR extraction failed: " + e.message);
+  }
+
+  // Strategy 3: Use Gemini to extract text from the file content
+  try {
+    var blob = file.getBlob();
+    var bytes = blob.getBytes();
+    if (bytes.length < 10 * 1024 * 1024) { // Under 10MB
+      var base64Content = Utilities.base64Encode(bytes);
+      text = geminiExtractTextFromPDF(base64Content, file.getMimeType());
+      if (text && text.trim().length > 10) {
+        Logger.log("Gemini text extraction successful");
+        return text;
+      }
+    }
+  } catch (e) {
+    Logger.log("Gemini extraction failed: " + e.message);
+  }
+
+  return text;
+}
+
+function geminiExtractTextFromPDF(base64Content, mimeType) {
+  var res = UrlFetchApp.fetch(
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=" + GEMINI_API_KEY,
+    {
+      method: "post",
+      contentType: "application/json",
+      payload: JSON.stringify({
+        contents: [{
+          parts: [
+            {
+              inline_data: {
+                mime_type: mimeType || "application/pdf",
+                data: base64Content
+              }
+            },
+            {
+              text: "Extract ALL text content from this document. Include every word, number, label, and annotation. Preserve the original structure and formatting as much as possible. Do not summarize."
+            }
+          ]
+        }],
+        generationConfig: {
+          temperature: 0.1,
+          maxOutputTokens: 8192
+        }
+      }),
+      muteHttpExceptions: true
+    }
   );
 
-  const folder = DriveApp.getFolderById(DRIVE_FOLDER_ID);
-  const file = folder.createFile(blob);
-  const fileId = file.getId();
-
-  // Register document in Supabase
-  const docId = data.documentId || Utilities.getUuid();
-  supabaseInsert("documents", {
-    id: docId,
-    name: data.fileName,
-    folder_id: data.folderId || null,
-    drive_file_id: fileId,
-    drive_preview_url: "https://drive.google.com/file/d/" + fileId + "/preview",
-    file_type: data.mimeType,
-    file_size: blob.getBytes().length,
-    status: "processing"
-  });
-
-  // Extract text from the file
-  let text = "";
-  try {
-    text = file.getBlob().getDataAsString();
-  } catch (e) {
-    // For non-text files (scanned PDFs), try OCR via Drive
-    try {
-      const ocrFile = Drive.Files.copy(
-        { title: data.fileName + "_ocr", mimeType: "application/vnd.google-apps.document" },
-        fileId,
-        { ocr: true }
-      );
-      const doc = DocumentApp.openById(ocrFile.id);
-      text = doc.getBody().getText();
-      DriveApp.getFileById(ocrFile.id).setTrashed(true);
-    } catch (e2) {
-      text = "Unable to extract text from this file.";
-    }
+  var result = JSON.parse(res.getContentText());
+  if (result.candidates && result.candidates[0]) {
+    return result.candidates[0].content.parts[0].text;
   }
-
-  if (!text || text.trim().length < 10) {
-    supabaseUpdate("documents", docId, { status: "error" });
-    return jsonResponse({ status: "error", message: "Could not extract text" });
-  }
-
-  // Smart engineering chunking
-  const chunks = engineeringChunk(text);
-
-  // Process each chunk
-  chunks.forEach(function(chunkText, index) {
-    try {
-      // Extract electrical components and connections via Gemini
-      const extraction = extractEngineeringData(chunkText);
-
-      // Generate embedding
-      const embedding = getGeminiEmbedding(chunkText);
-
-      // Save chunk to Supabase
-      supabaseInsert("chunks", {
-        document_id: docId,
-        content: chunkText,
-        page_number: index + 1,
-        panel: extraction.panel || "",
-        voltage: extraction.voltage || "",
-        components: extraction.components || [],
-        connections: extraction.connections || [],
-        metadata: { chunk_index: index, total_chunks: chunks.length },
-        embedding: embedding
-      });
-    } catch (chunkErr) {
-      Logger.log("Chunk " + index + " error: " + chunkErr.message);
-    }
-  });
-
-  // Update document status
-  supabaseUpdate("documents", docId, {
-    status: "indexed",
-    page_count: chunks.length
-  });
-
-  return jsonResponse({
-    status: "indexed",
-    documentId: docId,
-    driveFileId: fileId,
-    chunksProcessed: chunks.length
-  });
+  return "";
 }
 
 // ============================================================
@@ -138,7 +314,7 @@ function uploadFile(data) {
 
 function engineeringChunk(text) {
   // Split by engineering-relevant boundaries
-  var sections = text.split(/(?=PANEL|FEEDER|TRANSFORMER|SECTION|DRAWING|SCHEDULE|SLD|CIRCUIT|BUSBAR)/gi);
+  var sections = text.split(/(?=PANEL|FEEDER|TRANSFORMER|SECTION|DRAWING|SCHEDULE|SLD|CIRCUIT|BUSBAR|SWITCHGEAR|SUBSTATION)/gi);
 
   // If no engineering splits found, use paragraph-based chunking
   if (sections.length <= 1) {
@@ -166,7 +342,6 @@ function engineeringChunk(text) {
   var finalChunks = [];
   for (var j = 0; j < chunks.length; j++) {
     if (chunks[j].length > 1500) {
-      // Split with overlap
       for (var k = 0; k < chunks[j].length; k += 1000) {
         var end = Math.min(k + 1200, chunks[j].length);
         finalChunks.push(chunks[j].substring(k, end));
@@ -199,7 +374,7 @@ function extractEngineeringData(text) {
 
   try {
     var res = UrlFetchApp.fetch(
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=" + GEMINI_API_KEY,
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + GEMINI_API_KEY,
       {
         method: "post",
         contentType: "application/json",
@@ -215,24 +390,23 @@ function extractEngineeringData(text) {
     );
 
     var output = JSON.parse(res.getContentText());
-    var responseText = output.candidates[0].content.parts[0].text;
 
-    // Clean markdown code blocks if present
+    if (!output.candidates || !output.candidates[0]) {
+      Logger.log("Gemini extraction: No candidates returned");
+      return fallbackExtraction(text);
+    }
+
+    var responseText = output.candidates[0].content.parts[0].text;
     responseText = responseText.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
 
     return JSON.parse(responseText);
   } catch (e) {
-    // Fallback: pattern-based detection
-    return {
-      panel: "",
-      voltage: "",
-      components: detectComponentsBasic(text),
-      connections: []
-    };
+    Logger.log("Gemini extraction error: " + e.message);
+    return fallbackExtraction(text);
   }
 }
 
-function detectComponentsBasic(text) {
+function fallbackExtraction(text) {
   var patterns = ["MCCB", "ACB", "MCB", "TRANSFORMER", "RELAY", "CONTACTOR",
     "BUSBAR", "CT", "PT", "VCB", "ISOLATOR", "FUSE", "MOTOR", "PLC",
     "CAPACITOR", "STARTER", "CABLE", "TERMINAL"];
@@ -243,7 +417,7 @@ function detectComponentsBasic(text) {
       found.push(patterns[i]);
     }
   }
-  return found;
+  return { panel: "", voltage: "", components: found, connections: [] };
 }
 
 // ============================================================
@@ -264,6 +438,12 @@ function getGeminiEmbedding(text) {
   );
 
   var result = JSON.parse(res.getContentText());
+
+  if (!result.embedding || !result.embedding.values) {
+    Logger.log("Embedding error: " + JSON.stringify(result));
+    throw new Error("Failed to generate embedding");
+  }
+
   return result.embedding.values;
 }
 
@@ -272,12 +452,15 @@ function getGeminiEmbedding(text) {
 // ============================================================
 
 function handleQuery(data) {
+  if (!data.query) {
+    return corsResponse({ error: "Query text is required" });
+  }
+
   var queryEmbedding = getGeminiEmbedding(data.query);
 
-  // Vector similarity search via Supabase RPC
   var rpcPayload = {
     query_embedding: queryEmbedding,
-    match_count: data.matchCount || 8
+    match_count: parseInt(data.matchCount) || 8
   };
 
   if (data.filterPanel) rpcPayload.filter_panel = data.filterPanel;
@@ -295,19 +478,31 @@ function handleQuery(data) {
   });
 
   var matches = JSON.parse(res.getContentText());
+
+  if (!Array.isArray(matches)) {
+    Logger.log("Supabase RPC error: " + JSON.stringify(matches));
+    return corsResponse({
+      error: "Vector search failed. Make sure schema.sql has been run and chunks exist.",
+      details: matches
+    });
+  }
+
   var context = matches.map(function(m) { return m.content; }).join("\n\n---\n\n");
 
-  // Generate answer with structured prompting
   var answer = generateStructuredAnswer(data.query, context, data.outputType || "text");
 
-  // Log query
-  supabaseInsert("query_logs", {
-    query: data.query,
-    answer: typeof answer === "string" ? answer : JSON.stringify(answer),
-    match_count: matches.length
-  });
+  // Log query (non-blocking)
+  try {
+    supabaseInsert("query_logs", {
+      query: data.query,
+      answer: typeof answer === "string" ? answer : JSON.stringify(answer),
+      match_count: matches.length
+    });
+  } catch (e) {
+    Logger.log("Query log insert failed: " + e.message);
+  }
 
-  return jsonResponse({
+  return corsResponse({
     answer: answer,
     matches: matches,
     matchCount: matches.length
@@ -326,7 +521,7 @@ function generateStructuredAnswer(query, context, outputType) {
   } else if (outputType === "wiring") {
     systemPrompt = "You are an electrical wiring expert. Based ONLY on the provided context, " +
       "provide detailed wiring information. Include cable sizes, connections, " +
-      "terminal numbers, and routing. Format as a clear table/list.";
+      "terminal numbers, and routing. Format as a clear list.";
   } else if (outputType === "schematic") {
     systemPrompt = "You are an electrical schematic expert. Based ONLY on the provided context, " +
       "describe the schematic structure. Return JSON with: " +
@@ -361,6 +556,11 @@ function generateStructuredAnswer(query, context, outputType) {
   );
 
   var result = JSON.parse(res.getContentText());
+
+  if (!result.candidates || !result.candidates[0]) {
+    return "Unable to generate answer. The Gemini API returned no response. This may be a quota issue.";
+  }
+
   return result.candidates[0].content.parts[0].text;
 }
 
@@ -368,17 +568,24 @@ function generateStructuredAnswer(query, context, outputType) {
 // FOLDER MANAGEMENT
 // ============================================================
 
-function createFolder(data) {
-  var folder = supabaseInsert("folders", {
+function createFolderAction(data) {
+  if (!data.name) {
+    return corsResponse({ error: "Folder name is required" });
+  }
+
+  var result = supabaseInsert("folders", {
     name: data.name,
     description: data.description || ""
   });
-  return jsonResponse({ status: "created", folder: folder });
+  return corsResponse({ status: "created", folder: result });
 }
 
-function deleteFolder(data) {
+function deleteFolderAction(data) {
+  if (!data.folderId) {
+    return corsResponse({ error: "Folder ID is required" });
+  }
   supabaseDelete("folders", data.folderId);
-  return jsonResponse({ status: "deleted" });
+  return corsResponse({ status: "deleted" });
 }
 
 function listFolders() {
@@ -386,9 +593,12 @@ function listFolders() {
     headers: {
       "apikey": SUPABASE_SERVICE_ROLE_KEY,
       "Authorization": "Bearer " + SUPABASE_SERVICE_ROLE_KEY
-    }
+    },
+    muteHttpExceptions: true
   });
-  return jsonResponse({ folders: JSON.parse(res.getContentText()) });
+
+  var data = JSON.parse(res.getContentText());
+  return corsResponse({ folders: Array.isArray(data) ? data : [] });
 }
 
 // ============================================================
@@ -397,28 +607,81 @@ function listFolders() {
 
 function listDocuments(data) {
   var url = SUPABASE_URL + "/rest/v1/documents?order=created_at.desc";
-  if (data.folderId) url += "&folder_id=eq." + data.folderId;
+  if (data && data.folderId) url += "&folder_id=eq." + data.folderId;
 
   var res = UrlFetchApp.fetch(url, {
     headers: {
       "apikey": SUPABASE_SERVICE_ROLE_KEY,
       "Authorization": "Bearer " + SUPABASE_SERVICE_ROLE_KEY
-    }
+    },
+    muteHttpExceptions: true
   });
-  return jsonResponse({ documents: JSON.parse(res.getContentText()) });
+
+  var docs = JSON.parse(res.getContentText());
+  return corsResponse({ documents: Array.isArray(docs) ? docs : [] });
 }
 
-function deleteDocument(data) {
+function deleteDocumentAction(data) {
+  if (!data.documentId) {
+    return corsResponse({ error: "Document ID is required" });
+  }
+
   // Delete from Drive if possible
   try {
     if (data.driveFileId) {
       DriveApp.getFileById(data.driveFileId).setTrashed(true);
     }
-  } catch (e) {}
+  } catch (e) {
+    Logger.log("Drive delete failed (file may not exist): " + e.message);
+  }
 
-  // Delete from Supabase (cascades to chunks)
+  // Delete chunks first, then document
+  supabaseDeleteWhere("chunks", "document_id", data.documentId);
   supabaseDelete("documents", data.documentId);
-  return jsonResponse({ status: "deleted" });
+  return corsResponse({ status: "deleted" });
+}
+
+// ============================================================
+// DRIVE SYNC — Pull files from Drive that aren't in Supabase
+// ============================================================
+
+function syncDriveFiles() {
+  try {
+    var folder = DriveApp.getFolderById(DRIVE_FOLDER_ID);
+    var files = folder.getFiles();
+    var synced = [];
+
+    while (files.hasNext()) {
+      var file = files.next();
+      var fileId = file.getId();
+
+      // Check if already in Supabase
+      var existing = supabaseSelect("documents", "drive_file_id=eq." + fileId);
+      if (existing && existing.length > 0) continue;
+
+      // Register in Supabase
+      var docId = Utilities.getUuid();
+      supabaseInsert("documents", {
+        id: docId,
+        name: file.getName(),
+        drive_file_id: fileId,
+        drive_preview_url: "https://drive.google.com/file/d/" + fileId + "/preview",
+        file_type: file.getMimeType(),
+        file_size: file.getSize(),
+        status: "uploaded"
+      });
+
+      synced.push({ name: file.getName(), id: docId });
+    }
+
+    return corsResponse({
+      status: "synced",
+      newFiles: synced.length,
+      files: synced
+    });
+  } catch (err) {
+    return corsResponse({ error: "Drive sync failed: " + err.message });
+  }
 }
 
 // ============================================================
@@ -437,9 +700,16 @@ function supabaseInsert(table, data) {
     payload: JSON.stringify(data),
     muteHttpExceptions: true
   });
+
+  var responseText = res.getContentText();
   try {
-    return JSON.parse(res.getContentText());
+    var parsed = JSON.parse(responseText);
+    if (parsed.message || parsed.error) {
+      Logger.log("Supabase insert error (" + table + "): " + responseText);
+    }
+    return parsed;
   } catch (e) {
+    Logger.log("Supabase insert parse error: " + responseText);
     return null;
   }
 }
@@ -468,11 +738,32 @@ function supabaseDelete(table, id) {
   });
 }
 
-// ============================================================
-// RESPONSE HELPER
-// ============================================================
+function supabaseDeleteWhere(table, column, value) {
+  UrlFetchApp.fetch(SUPABASE_URL + "/rest/v1/" + table + "?" + column + "=eq." + value, {
+    method: "delete",
+    headers: {
+      "apikey": SUPABASE_SERVICE_ROLE_KEY,
+      "Authorization": "Bearer " + SUPABASE_SERVICE_ROLE_KEY
+    },
+    muteHttpExceptions: true
+  });
+}
 
-function jsonResponse(data) {
-  return ContentService.createTextOutput(JSON.stringify(data))
-    .setMimeType(ContentService.MimeType.JSON);
+function supabaseSelect(table, filter) {
+  var url = SUPABASE_URL + "/rest/v1/" + table;
+  if (filter) url += "?" + filter;
+
+  var res = UrlFetchApp.fetch(url, {
+    headers: {
+      "apikey": SUPABASE_SERVICE_ROLE_KEY,
+      "Authorization": "Bearer " + SUPABASE_SERVICE_ROLE_KEY
+    },
+    muteHttpExceptions: true
+  });
+
+  try {
+    return JSON.parse(res.getContentText());
+  } catch (e) {
+    return [];
+  }
 }
