@@ -26,19 +26,39 @@ export default function Dashboard() {
     useEffect(() => {
         async function loadData() {
             try {
-                const [foldersRes, docsRes] = await Promise.all([
-                    listFolders().catch(() => ({ folders: [] })),
-                    listDocuments().catch(() => ({ documents: [] })),
-                ]);
-                setFolders(foldersRes.folders || []);
-                setDocuments(docsRes.documents || []);
+                // Fetch folders
+                let fetchedFolders = [];
+                try {
+                    const foldersRes = await listFolders();
+                    console.log('[MetroCircuit] Dashboard folders response:', foldersRes);
+                    fetchedFolders = foldersRes.folders || foldersRes || [];
+                    if (!Array.isArray(fetchedFolders)) fetchedFolders = [];
+                } catch (fErr) {
+                    console.error('[MetroCircuit] Dashboard folders error:', fErr);
+                }
+
+                // Fetch documents
+                let fetchedDocs = [];
+                try {
+                    const docsRes = await listDocuments();
+                    console.log('[MetroCircuit] Dashboard docs response:', docsRes);
+                    fetchedDocs = docsRes.documents || docsRes || [];
+                    if (!Array.isArray(fetchedDocs)) fetchedDocs = [];
+                } catch (dErr) {
+                    console.error('[MetroCircuit] Dashboard docs error:', dErr);
+                }
+
+                console.log('[MetroCircuit] Dashboard loaded: folders=' + fetchedFolders.length + ' docs=' + fetchedDocs.length);
+
+                setFolders(fetchedFolders);
+                setDocuments(fetchedDocs);
                 setStats({
-                    docs: (docsRes.documents || []).length,
-                    folders: (foldersRes.folders || []).length,
-                    chunks: (docsRes.documents || []).reduce((a, d) => a + (d.page_count || 0), 0),
+                    docs: fetchedDocs.length,
+                    folders: fetchedFolders.length,
+                    chunks: fetchedDocs.reduce((a, d) => a + (d.page_count || 0), 0),
                 });
             } catch (e) {
-                // Config not set yet, use empty data
+                console.error('[MetroCircuit] Dashboard loadData error:', e);
             }
             setLoaded(true);
         }

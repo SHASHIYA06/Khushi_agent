@@ -9,7 +9,7 @@ import { listFolders, createFolder, deleteFolder, listDocuments, uploadDocument,
 import {
     HiOutlineFolder, HiOutlineFolderAdd, HiOutlineDocumentText,
     HiOutlineTrash, HiOutlineUpload, HiOutlineX, HiOutlineEye,
-    HiOutlineRefresh, HiOutlineDocumentAdd
+    HiOutlineRefresh, HiOutlineDocumentAdd, HiOutlineExclamationCircle
 } from 'react-icons/hi';
 
 export default function DocumentsPage() {
@@ -21,21 +21,54 @@ export default function DocumentsPage() {
     const [previewDoc, setPreviewDoc] = useState(null);
     const [loading, setLoading] = useState(false);
     const [syncing, setSyncing] = useState(false);
+    const [error, setError] = useState('');
 
     useEffect(() => {
         loadData();
     }, []);
 
+    // Also reload when folder selection changes
+    useEffect(() => {
+        if (selectedFolder !== undefined) {
+            loadData();
+        }
+    }, [selectedFolder?.id]);
+
     async function loadData() {
         setLoading(true);
+        setError('');
+
         try {
-            const [fRes, dRes] = await Promise.all([
-                listFolders().catch(() => ({ folders: [] })),
-                listDocuments(selectedFolder?.id).catch(() => ({ documents: [] })),
-            ]);
-            setFolders(fRes.folders || []);
-            setDocuments(dRes.documents || []);
-        } catch (e) { }
+            // Fetch folders
+            let fetchedFolders = [];
+            try {
+                const fRes = await listFolders();
+                console.log('[MetroCircuit] Folders response:', fRes);
+                fetchedFolders = fRes.folders || fRes || [];
+                if (!Array.isArray(fetchedFolders)) fetchedFolders = [];
+            } catch (fErr) {
+                console.error('[MetroCircuit] Failed to load folders:', fErr);
+            }
+
+            // Fetch documents
+            let fetchedDocs = [];
+            try {
+                const dRes = await listDocuments(selectedFolder?.id || null);
+                console.log('[MetroCircuit] Documents response:', dRes);
+                fetchedDocs = dRes.documents || dRes || [];
+                if (!Array.isArray(fetchedDocs)) fetchedDocs = [];
+            } catch (dErr) {
+                console.error('[MetroCircuit] Failed to load documents:', dErr);
+            }
+
+            console.log('[MetroCircuit] Setting folders:', fetchedFolders.length, 'docs:', fetchedDocs.length);
+            setFolders(fetchedFolders);
+            setDocuments(fetchedDocs);
+
+        } catch (e) {
+            console.error('[MetroCircuit] loadData error:', e);
+            setError('Failed to load data: ' + e.message);
+        }
         setLoading(false);
     }
 
@@ -43,12 +76,12 @@ export default function DocumentsPage() {
         if (!newFolderName.trim()) return;
         try {
             await createFolder(newFolderName.trim());
-            addNotification('Folder created: ' + newFolderName, 'success');
             setNewFolderName('');
             setShowNewFolder(false);
-            loadData();
+            addNotification('Folder created: ' + newFolderName, 'success');
+            await loadData();
         } catch (e) {
-            addNotification('Error creating folder: ' + e.message, 'error');
+            addNotification('Failed: ' + e.message, 'error');
         }
     }
 
@@ -56,11 +89,11 @@ export default function DocumentsPage() {
         if (!confirm('Delete this folder and all its documents?')) return;
         try {
             await deleteFolder(id);
-            addNotification('Folder deleted', 'success');
             if (selectedFolder?.id === id) setSelectedFolder(null);
-            loadData();
+            addNotification('Folder deleted', 'success');
+            await loadData();
         } catch (e) {
-            addNotification('Error: ' + e.message, 'error');
+            addNotification('Failed: ' + e.message, 'error');
         }
     }
 
@@ -69,9 +102,9 @@ export default function DocumentsPage() {
         try {
             await deleteDocument(doc.id, doc.drive_file_id);
             addNotification('Document deleted', 'success');
-            loadData();
+            await loadData();
         } catch (e) {
-            addNotification('Error: ' + e.message, 'error');
+            addNotification('Failed: ' + e.message, 'error');
         }
     }
 
@@ -91,7 +124,7 @@ export default function DocumentsPage() {
 
         setUploading(false);
         setUploadProgress('');
-        loadData();
+        await loadData();
     }, [selectedFolder]);
 
     const { getRootProps, getInputProps, isDragActive } = useDropzone({
@@ -100,8 +133,10 @@ export default function DocumentsPage() {
             'application/pdf': ['.pdf'],
             'text/plain': ['.txt'],
             'text/csv': ['.csv'],
+            'image/png': ['.png'],
+            'image/jpeg': ['.jpg', '.jpeg'],
         },
-        maxSize: 200 * 1024 * 1024,
+        maxSize: 50 * 1024 * 1024,
     });
 
     const filteredDocs = selectedFolder
@@ -117,6 +152,7 @@ export default function DocumentsPage() {
                         <h1 className="text-3xl font-bold" style={{ color: 'var(--text-primary)' }}>Documents</h1>
                         <p className="text-sm mt-1" style={{ color: 'var(--text-secondary)' }}>
                             Manage folders and upload electrical drawings
+                            {documents.length > 0 && <span className="ml-2" style={{ color: 'var(--accent-blue)' }}>({documents.length} total)</span>}
                         </p>
                     </div>
                     <div className="flex items-center gap-2">
@@ -125,8 +161,9 @@ export default function DocumentsPage() {
                                 setSyncing(true);
                                 try {
                                     const res = await syncDrive();
+                                    console.log('[MetroCircuit] Sync result:', res);
                                     addNotification(`Drive synced: ${res.newFiles || 0} new files found`, 'success');
-                                    loadData();
+                                    await loadData();
                                 } catch (e) {
                                     addNotification('Sync failed: ' + e.message, 'error');
                                 }
@@ -138,11 +175,23 @@ export default function DocumentsPage() {
                             <HiOutlineRefresh size={16} className={syncing ? 'animate-spin' : ''} />
                             {syncing ? 'Syncing...' : 'Sync Drive'}
                         </button>
-                        <button onClick={loadData} className="btn-secondary">
-                            <HiOutlineRefresh size={16} /> Refresh
+                        <button onClick={loadData} className="btn-secondary" disabled={loading}>
+                            <HiOutlineRefresh size={16} className={loading ? 'animate-spin' : ''} />
+                            {loading ? 'Loading...' : 'Refresh'}
                         </button>
                     </div>
                 </div>
+
+                {/* Error Banner */}
+                {error && (
+                    <div className="glass-card p-4 mb-4 flex items-center gap-3" style={{ borderLeft: '3px solid var(--accent-rose)' }}>
+                        <HiOutlineExclamationCircle size={20} style={{ color: 'var(--accent-rose)' }} />
+                        <div>
+                            <p className="text-sm font-medium" style={{ color: 'var(--accent-rose)' }}>Error loading data</p>
+                            <p className="text-xs" style={{ color: 'var(--text-secondary)' }}>{error}</p>
+                        </div>
+                    </div>
+                )}
 
                 {/* Folders Section */}
                 <div className="mb-6">
@@ -235,7 +284,7 @@ export default function DocumentsPage() {
                                     {isDragActive ? 'Drop files here...' : 'Drag & drop documents here'}
                                 </p>
                                 <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>
-                                    or click to browse • PDF, TXT, CSV • Max 200MB
+                                    or click to browse • PDF, TXT, CSV, Images • Max 50MB
                                 </p>
                                 {selectedFolder && (
                                     <p className="text-xs mt-2" style={{ color: 'var(--accent-purple)' }}>
@@ -251,12 +300,21 @@ export default function DocumentsPage() {
                 <div>
                     <h2 className="text-lg font-semibold mb-4" style={{ color: 'var(--text-primary)' }}>
                         {selectedFolder ? `${selectedFolder.name} — Documents` : 'All Documents'}
+                        <span className="text-sm font-normal ml-2" style={{ color: 'var(--text-secondary)' }}>
+                            ({filteredDocs.length} {filteredDocs.length === 1 ? 'file' : 'files'})
+                        </span>
                     </h2>
                     <div className="glass-card overflow-hidden">
-                        {filteredDocs.length === 0 ? (
+                        {loading ? (
+                            <div className="p-8 text-center" style={{ color: 'var(--text-secondary)' }}>
+                                <div className="spinner mx-auto mb-3" />
+                                <p>Loading documents...</p>
+                            </div>
+                        ) : filteredDocs.length === 0 ? (
                             <div className="p-8 text-center" style={{ color: 'var(--text-secondary)' }}>
                                 <HiOutlineDocumentText size={40} className="mx-auto mb-3 opacity-30" />
                                 <p>No documents found</p>
+                                <p className="text-sm mt-1">Upload a document or click "Sync Drive" to import from Google Drive</p>
                             </div>
                         ) : (
                             <div className="overflow-x-auto">
@@ -294,7 +352,7 @@ export default function DocumentsPage() {
                                                     {doc.page_count || 0}
                                                 </td>
                                                 <td className="p-4 text-sm hidden lg:table-cell" style={{ color: 'var(--text-secondary)' }}>
-                                                    {new Date(doc.created_at).toLocaleDateString()}
+                                                    {doc.created_at ? new Date(doc.created_at).toLocaleDateString() : '—'}
                                                 </td>
                                                 <td className="p-4 text-right">
                                                     <div className="flex items-center justify-end gap-2">
