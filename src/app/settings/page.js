@@ -4,47 +4,36 @@ import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import AppShell from '@/components/layout/AppShell';
 import useStore from '@/store/useStore';
-import { getConfig, saveConfig, CONFIG_KEYS } from '@/lib/config';
-import { HiOutlineCog, HiOutlineKey, HiOutlineCloud, HiOutlineDatabase, HiOutlineCheck, HiOutlineExclamation } from 'react-icons/hi';
+import { getConfig, saveAllConfig } from '@/lib/config';
+import { checkBackendHealth, initDatabase } from '@/lib/api';
+import {
+    HiOutlineCog, HiOutlineKey, HiOutlineCloud,
+    HiOutlineCheck, HiOutlineExclamation, HiOutlineDatabase,
+    HiOutlineLightningBolt, HiOutlineRefresh
+} from 'react-icons/hi';
 
 const configFields = [
     {
-        key: CONFIG_KEYS.GOOGLE_SCRIPT_URL,
+        key: 'GOOGLE_SCRIPT_URL',
         label: 'Google Apps Script URL',
         placeholder: 'https://script.google.com/macros/s/.../exec',
-        description: 'Deploy your Apps Script as a web app and paste the URL here',
+        description: 'Deploy your Apps Script as a Web App → Copy the URL. Must end with /exec',
         icon: HiOutlineCloud,
         type: 'url',
     },
     {
-        key: CONFIG_KEYS.SUPABASE_URL,
-        label: 'Supabase Project URL',
-        placeholder: 'https://your-project.supabase.co',
-        description: 'Find this in Supabase Dashboard → Settings → API',
-        icon: HiOutlineDatabase,
-        type: 'url',
-    },
-    {
-        key: CONFIG_KEYS.SUPABASE_ANON_KEY,
-        label: 'Supabase Anon/Service Key',
-        placeholder: 'eyJ...',
-        description: 'Supabase Dashboard → Settings → API → Service Role Key',
-        icon: HiOutlineKey,
-        type: 'password',
-    },
-    {
-        key: CONFIG_KEYS.GEMINI_API_KEY,
+        key: 'GEMINI_API_KEY',
         label: 'Gemini API Key',
         placeholder: 'AIza...',
-        description: 'Get from Google AI Studio → API Keys',
+        description: 'Get from Google AI Studio → API Keys. Used for text extraction & RAG',
         icon: HiOutlineKey,
         type: 'password',
     },
     {
-        key: CONFIG_KEYS.DRIVE_FOLDER_ID,
+        key: 'DRIVE_FOLDER_ID',
         label: 'Google Drive Folder ID',
         placeholder: '1Ab2Cd3Ef...',
-        description: 'The folder ID from your Google Drive URL for document storage',
+        description: 'Create a folder in Drive → copy the ID from the URL. Same one used in Code.gs',
         icon: HiOutlineCloud,
         type: 'text',
     },
@@ -53,38 +42,47 @@ const configFields = [
 export default function SettingsPage() {
     const { addNotification } = useStore();
     const [values, setValues] = useState({});
-    const [saved, setSaved] = useState({});
+    const [testing, setTesting] = useState(false);
+    const [initializing, setInitializing] = useState(false);
+    const [healthStatus, setHealthStatus] = useState(null);
+    const [dbInfo, setDbInfo] = useState(null);
 
     useEffect(() => {
         const config = getConfig();
-        const initial = {};
-        configFields.forEach(f => {
-            initial[f.key] = localStorage.getItem(f.key) || '';
-        });
-        setValues(initial);
+        setValues(config);
     }, []);
 
-    function handleSave(key) {
-        saveConfig(key, values[key]);
-        setSaved(prev => ({ ...prev, [key]: true }));
-        addNotification('Setting saved', 'success');
-        setTimeout(() => setSaved(prev => ({ ...prev, [key]: false })), 2000);
-    }
-
     function handleSaveAll() {
-        Object.entries(values).forEach(([key, value]) => {
-            saveConfig(key, value);
-        });
-        addNotification('All settings saved!', 'success');
+        saveAllConfig(values);
+        addNotification('All settings saved! ✓', 'success');
     }
 
-    function checkConfig() {
-        const missing = configFields.filter(f => !values[f.key]);
-        if (missing.length === 0) {
-            addNotification('All configurations are set! ✓', 'success');
-        } else {
-            addNotification(`Missing: ${missing.map(f => f.label).join(', ')}`, 'error');
+    async function testConnection() {
+        handleSaveAll();  // Save first
+        setTesting(true);
+        setHealthStatus(null);
+        try {
+            const res = await checkBackendHealth();
+            setHealthStatus({ ok: true, data: res });
+            addNotification('Backend connected! v' + (res.version || '?'), 'success');
+        } catch (e) {
+            setHealthStatus({ ok: false, error: e.message });
+            addNotification('Connection failed: ' + e.message, 'error');
         }
+        setTesting(false);
+    }
+
+    async function handleInitDB() {
+        handleSaveAll();  // Save first
+        setInitializing(true);
+        try {
+            const res = await initDatabase();
+            setDbInfo(res);
+            addNotification('Database initialized! Google Sheet created. ✓', 'success');
+        } catch (e) {
+            addNotification('Init failed: ' + e.message, 'error');
+        }
+        setInitializing(false);
     }
 
     return (
@@ -97,18 +95,48 @@ export default function SettingsPage() {
                             <HiOutlineCog className="inline mr-2 mb-1" />Settings
                         </h1>
                         <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>
-                            Configure your API keys and backend URLs
+                            Configure your backend — only 3 settings needed!
                         </p>
                     </div>
                     <div className="flex gap-2">
-                        <button onClick={checkConfig} className="btn-secondary">
-                            <HiOutlineExclamation size={16} /> Check Config
+                        <button onClick={testConnection} className="btn-secondary" disabled={testing}>
+                            <HiOutlineRefresh size={16} className={testing ? 'animate-spin' : ''} />
+                            {testing ? 'Testing...' : 'Test Connection'}
                         </button>
                         <button onClick={handleSaveAll} className="btn-primary">
                             <HiOutlineCheck size={16} /> Save All
                         </button>
                     </div>
                 </div>
+
+                {/* Connection Status */}
+                {healthStatus && (
+                    <motion.div
+                        initial={{ opacity: 0, y: -10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="glass-card p-4 mb-6 max-w-3xl"
+                        style={{ borderLeft: healthStatus.ok ? '3px solid var(--accent-emerald)' : '3px solid var(--accent-rose)' }}
+                    >
+                        {healthStatus.ok ? (
+                            <div className="flex items-center gap-3">
+                                <HiOutlineCheck size={20} style={{ color: 'var(--accent-emerald)' }} />
+                                <div>
+                                    <p className="font-semibold text-sm" style={{ color: 'var(--accent-emerald)' }}>
+                                        ✅ Connected! Backend v{healthStatus.data?.version || '3.0'} — Database: {healthStatus.data?.db || 'Google Sheets'}
+                                    </p>
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="flex items-center gap-3">
+                                <HiOutlineExclamation size={20} style={{ color: 'var(--accent-rose)' }} />
+                                <div>
+                                    <p className="font-semibold text-sm" style={{ color: 'var(--accent-rose)' }}>❌ Connection Failed</p>
+                                    <p className="text-xs" style={{ color: 'var(--text-secondary)' }}>{healthStatus.error}</p>
+                                </div>
+                            </div>
+                        )}
+                    </motion.div>
+                )}
 
                 {/* Config fields */}
                 <div className="space-y-4 max-w-3xl">
@@ -133,26 +161,13 @@ export default function SettingsPage() {
                                         <p className="text-xs mb-3" style={{ color: 'var(--text-secondary)' }}>
                                             {field.description}
                                         </p>
-                                        <div className="flex gap-2">
-                                            <input
-                                                type={field.type === 'password' ? 'password' : 'text'}
-                                                className="input-field flex-1"
-                                                placeholder={field.placeholder}
-                                                value={values[field.key] || ''}
-                                                onChange={(e) => setValues(prev => ({ ...prev, [field.key]: e.target.value }))}
-                                            />
-                                            <button
-                                                onClick={() => handleSave(field.key)}
-                                                className={saved[field.key] ? 'btn-primary' : 'btn-secondary'}
-                                                style={{ minWidth: '80px' }}
-                                            >
-                                                {saved[field.key] ? (
-                                                    <><HiOutlineCheck size={14} /> Saved</>
-                                                ) : (
-                                                    'Save'
-                                                )}
-                                            </button>
-                                        </div>
+                                        <input
+                                            type={field.type === 'password' ? 'password' : 'text'}
+                                            className="input-field w-full"
+                                            placeholder={field.placeholder}
+                                            value={values[field.key] || ''}
+                                            onChange={(e) => setValues(prev => ({ ...prev, [field.key]: e.target.value }))}
+                                        />
                                     </div>
                                 </div>
                             </motion.div>
@@ -160,25 +175,82 @@ export default function SettingsPage() {
                     })}
                 </div>
 
+                {/* Initialize Database */}
+                <div className="glass-card p-6 mt-6 max-w-3xl" style={{ borderLeft: '3px solid var(--accent-purple)' }}>
+                    <div className="flex items-center justify-between">
+                        <div>
+                            <h3 className="font-semibold flex items-center gap-2" style={{ color: 'var(--text-primary)' }}>
+                                <HiOutlineDatabase size={20} style={{ color: 'var(--accent-purple)' }} />
+                                Initialize Database
+                            </h3>
+                            <p className="text-sm mt-1" style={{ color: 'var(--text-secondary)' }}>
+                                Auto-creates a Google Sheet with Documents, Chunks, Folders, and QueryLogs tabs.
+                                Click this once after setting your Apps Script URL.
+                            </p>
+                            {dbInfo && dbInfo.spreadsheetUrl && (
+                                <a
+                                    href={dbInfo.spreadsheetUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-xs mt-2 inline-block underline"
+                                    style={{ color: 'var(--accent-blue)' }}
+                                >
+                                    📊 Open Database Spreadsheet →
+                                </a>
+                            )}
+                        </div>
+                        <button
+                            onClick={handleInitDB}
+                            className="btn-primary"
+                            disabled={initializing}
+                        >
+                            <HiOutlineLightningBolt size={16} />
+                            {initializing ? 'Creating...' : 'Initialize DB'}
+                        </button>
+                    </div>
+                </div>
+
                 {/* Setup Guide */}
-                <div className="glass-card p-6 mt-8 max-w-3xl">
-                    <h3 className="font-semibold mb-4" style={{ color: 'var(--text-primary)' }}>📋 Setup Guide</h3>
+                <div className="glass-card p-6 mt-6 max-w-3xl">
+                    <h3 className="font-semibold mb-4" style={{ color: 'var(--text-primary)' }}>📋 Quick Setup Guide</h3>
                     <div className="space-y-3 text-sm" style={{ color: 'var(--text-secondary)' }}>
-                        <div className="flex gap-3">
-                            <span className="font-bold" style={{ color: 'var(--accent-blue)' }}>1.</span>
-                            <p><strong>Supabase:</strong> Create a free project at supabase.com → Run the schema SQL in SQL Editor → Copy URL and Service Role Key.</p>
+                        <div className="flex gap-3 items-start">
+                            <span className="w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 text-xs font-bold" style={{ background: 'var(--accent-blue)', color: 'white' }}>1</span>
+                            <p><strong>Google Drive:</strong> Create a folder for your documents → Copy the folder ID from the URL bar.</p>
                         </div>
-                        <div className="flex gap-3">
-                            <span className="font-bold" style={{ color: 'var(--accent-blue)' }}>2.</span>
-                            <p><strong>Gemini API:</strong> Go to Google AI Studio → Create API key → Paste above.</p>
+                        <div className="flex gap-3 items-start">
+                            <span className="w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 text-xs font-bold" style={{ background: 'var(--accent-blue)', color: 'white' }}>2</span>
+                            <p><strong>Gemini API:</strong> Go to <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" className="underline">Google AI Studio</a> → Create API key.</p>
                         </div>
-                        <div className="flex gap-3">
-                            <span className="font-bold" style={{ color: 'var(--accent-blue)' }}>3.</span>
-                            <p><strong>Google Apps Script:</strong> Create new project at script.google.com → Paste Code.gs → Deploy as Web App (Execute as Me, Access: Anyone) → Copy the URL.</p>
+                        <div className="flex gap-3 items-start">
+                            <span className="w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 text-xs font-bold" style={{ background: 'var(--accent-blue)', color: 'white' }}>3</span>
+                            <p><strong>Apps Script:</strong> Go to <a href="https://script.google.com" target="_blank" rel="noopener" className="underline">script.google.com</a> → New Project → Paste <code>Code.gs</code> → Set your GEMINI_API_KEY and DRIVE_FOLDER_ID in the code → Enable &quot;Drive API&quot; in Services → Deploy as Web App (Execute as: Me, Access: Anyone).</p>
                         </div>
-                        <div className="flex gap-3">
-                            <span className="font-bold" style={{ color: 'var(--accent-blue)' }}>4.</span>
-                            <p><strong>Drive Folder:</strong> Create a folder in Google Drive → Copy the folder ID from URL → Also update DRIVE_FOLDER_ID in your Apps Script.</p>
+                        <div className="flex gap-3 items-start">
+                            <span className="w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 text-xs font-bold" style={{ background: 'var(--accent-purple)', color: 'white' }}>4</span>
+                            <p><strong>Initialize:</strong> Paste all 3 values above → Click &quot;Save All&quot; → Click &quot;Initialize DB&quot; → Done! 🎉</p>
+                        </div>
+                    </div>
+                </div>
+
+                {/* Architecture Info */}
+                <div className="glass-card p-6 mt-6 max-w-3xl" style={{ background: 'rgba(59, 130, 246, 0.03)' }}>
+                    <h3 className="font-semibold mb-3" style={{ color: 'var(--text-primary)' }}>🏗️ Architecture (No External DB)</h3>
+                    <div className="text-sm" style={{ color: 'var(--text-secondary)' }}>
+                        <p className="mb-2">This app uses <strong>Google Sheets as its database</strong> — no Supabase, no Firebase, no external accounts needed.</p>
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3">
+                            <div className="rounded-xl p-3" style={{ background: 'rgba(59, 130, 246, 0.08)' }}>
+                                <p className="font-semibold text-xs mb-1" style={{ color: 'var(--accent-blue)' }}>📁 File Storage</p>
+                                <p className="text-xs">Google Drive</p>
+                            </div>
+                            <div className="rounded-xl p-3" style={{ background: 'rgba(168, 85, 247, 0.08)' }}>
+                                <p className="font-semibold text-xs mb-1" style={{ color: 'var(--accent-purple)' }}>📊 Database</p>
+                                <p className="text-xs">Google Sheets (auto-created)</p>
+                            </div>
+                            <div className="rounded-xl p-3" style={{ background: 'rgba(16, 185, 129, 0.08)' }}>
+                                <p className="font-semibold text-xs mb-1" style={{ color: 'var(--accent-emerald)' }}>🤖 AI Engine</p>
+                                <p className="text-xs">Gemini 1.5 Flash</p>
+                            </div>
                         </div>
                     </div>
                 </div>

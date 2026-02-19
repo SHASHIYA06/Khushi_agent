@@ -15,7 +15,7 @@ import {
 import '@xyflow/react/dist/style.css';
 import AppShell from '@/components/layout/AppShell';
 import useStore from '@/store/useStore';
-import { queryDocuments } from '@/lib/api';
+import { queryRAG } from '@/lib/api';
 import {
     HiOutlineChip, HiOutlineLightningBolt, HiOutlineRefresh,
     HiOutlineZoomIn, HiOutlineDownload, HiOutlineSearch,
@@ -117,7 +117,7 @@ export default function DiagramPage() {
         if (!searchQuery.trim()) return;
         setLoading(true);
         try {
-            const result = await queryDocuments(searchQuery, {
+            const result = await queryRAG(searchQuery, {
                 outputType: 'schematic',
                 matchCount: 10,
             });

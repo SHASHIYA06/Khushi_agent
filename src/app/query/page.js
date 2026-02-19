@@ -13,7 +13,7 @@ import {
 import '@xyflow/react/dist/style.css';
 import AppShell from '@/components/layout/AppShell';
 import useStore from '@/store/useStore';
-import { queryDocuments } from '@/lib/api';
+import { queryRAG } from '@/lib/api';
 import {
     HiOutlineSearch, HiOutlineLightningBolt, HiOutlineCode,
     HiOutlineDocumentText, HiOutlineChip, HiOutlineFilter
@@ -61,7 +61,7 @@ export default function QueryPage() {
         if (!query.trim()) return;
         setLoading(true);
         try {
-            const result = await queryDocuments(query, {
+            const result = await queryRAG(query, {
                 outputType,
                 filterPanel: filterPanel || null,
                 filterVoltage: filterVoltage || null,

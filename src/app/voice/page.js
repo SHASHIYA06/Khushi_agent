@@ -4,7 +4,7 @@ import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import AppShell from '@/components/layout/AppShell';
 import useStore from '@/store/useStore';
-import { queryDocuments } from '@/lib/api';
+import { queryRAG } from '@/lib/api';
 import { HiOutlineMicrophone, HiOutlineVolumeUp, HiOutlineStop } from 'react-icons/hi';
 
 export default function VoicePage() {
@@ -66,7 +66,7 @@ export default function VoicePage() {
     async function handleVoiceQuery(text) {
         setLoading(true);
         try {
-            const result = await queryDocuments(text);
+            const result = await queryRAG(text);
             const answer = result.answer || 'No answer found.';
             setResponse(answer);
             setHistory(prev => [{ query: text, answer, time: new Date() }, ...prev].slice(0, 20));

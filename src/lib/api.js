@@ -3,64 +3,85 @@
 import { getConfig } from './config';
 
 // ============================================================
-// Google Apps Script API Service Layer
+// API Service — Talks to Google Apps Script backend
+// No Supabase, no external DB — everything via Google Sheets
 // ============================================================
-// Key fixes for GAS web app compatibility:
-// 1. No Content-Type header → avoids CORS preflight (OPTIONS)
-// 2. Use redirect: 'follow' → handles GAS 302 redirects
-// 3. Use text/plain content type → no preflight trigger
-// 4. Robust error handling for opaque/redirect responses
+
+const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
+
+// ============================================================
+// CORE: Call the backend
+// Uses text/plain to avoid CORS preflight with Google Apps Script
 // ============================================================
 
 async function callBackend(payload) {
     const config = getConfig();
+
     if (!config.GOOGLE_SCRIPT_URL) {
-        throw new Error('Google Script URL not configured. Please go to Settings.');
+        throw new Error('Google Script URL not configured. Go to Settings → paste your Apps Script deployment URL.');
     }
+
+    console.log('[MetroCircuit] API call:', payload.action, payload);
 
     try {
         const res = await fetch(config.GOOGLE_SCRIPT_URL, {
             method: 'POST',
             redirect: 'follow',
-            headers: {
-                'Content-Type': 'text/plain;charset=utf-8',
-            },
+            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
             body: JSON.stringify(payload),
         });
 
-        // GAS web apps may return various status codes after redirect
         const text = await res.text();
+        console.log('[MetroCircuit] Raw response (' + payload.action + '):', text.substring(0, 500));
 
-        if (!text) {
+        if (!text || text.trim().length === 0) {
             throw new Error('Empty response from backend');
         }
 
+        let data;
         try {
-            return JSON.parse(text);
+            data = JSON.parse(text);
         } catch (parseErr) {
-            // Check if response contains an error HTML page
+            // Sometimes GAS returns HTML error pages
             if (text.includes('<!DOCTYPE') || text.includes('<html')) {
-                throw new Error('Backend returned HTML instead of JSON. Check your Apps Script deployment URL and make sure it is deployed as "Execute as Me, Anyone can access".');
+                throw new Error('Backend returned HTML instead of JSON. Re-deploy your Google Apps Script.');
             }
             throw new Error('Invalid JSON response: ' + text.substring(0, 200));
         }
+
+        if (data.error) {
+            throw new Error(data.error);
+        }
+
+        return data;
+
     } catch (err) {
         if (err.message.includes('Failed to fetch') || err.message.includes('NetworkError')) {
-            throw new Error(
-                'Network error connecting to backend. Possible causes:\n' +
-                '1. Google Script URL is incorrect\n' +
-                '2. Apps Script is not deployed as Web App\n' +
-                '3. Deployment access is not set to "Anyone"\n' +
-                '4. You need to re-deploy after code changes'
-            );
+            throw new Error('Cannot reach backend. Check your Google Script URL in Settings.');
         }
         throw err;
     }
 }
 
 // ============================================================
+// INIT / HEALTH
+// ============================================================
+
+export async function initDatabase() {
+    return callBackend({ action: 'init_db' });
+}
+
+export async function checkBackendHealth() {
+    return callBackend({ action: 'health' });
+}
+
+// ============================================================
 // FOLDER OPERATIONS
 // ============================================================
+
+export async function listFolders() {
+    return callBackend({ action: 'list_folders' });
+}
 
 export async function createFolder(name, description = '') {
     return callBackend({ action: 'create_folder', name, description });
@@ -70,19 +91,17 @@ export async function deleteFolder(folderId) {
     return callBackend({ action: 'delete_folder', folderId });
 }
 
-export async function listFolders() {
-    return callBackend({ action: 'list_folders' });
-}
-
 // ============================================================
 // DOCUMENT OPERATIONS
 // ============================================================
 
+export async function listDocuments(folderId = null) {
+    return callBackend({ action: 'list_documents', folderId });
+}
+
 export async function uploadDocument(file, folderId = null) {
-    // Validate file size (max 50MB for base64 over Apps Script)
-    const MAX_SIZE = 50 * 1024 * 1024;
-    if (file.size > MAX_SIZE) {
-        throw new Error(`File too large (${(file.size / 1024 / 1024).toFixed(1)}MB). Max is 50MB for Apps Script processing.`);
+    if (file.size > MAX_FILE_SIZE) {
+        throw new Error(`File too large (${(file.size / 1024 / 1024).toFixed(1)}MB). Max is 50MB.`);
     }
 
     return new Promise((resolve, reject) => {
@@ -94,46 +113,21 @@ export async function uploadDocument(file, folderId = null) {
                     action: 'upload',
                     file: base64,
                     fileName: file.name,
-                    mimeType: file.type || 'application/pdf',
-                    documentId: crypto.randomUUID(),
-                    folderId,
+                    mimeType: file.type,
+                    folderId: folderId,
                 });
-
-                if (result.error) {
-                    reject(new Error(result.error));
-                } else {
-                    resolve(result);
-                }
+                resolve(result);
             } catch (err) {
                 reject(err);
             }
         };
-        reader.onerror = () => reject(new Error('Failed to read file'));
+        reader.onerror = () => reject(new Error('File read failed'));
         reader.readAsDataURL(file);
     });
 }
 
-export async function listDocuments(folderId = null) {
-    return callBackend({ action: 'list_documents', folderId });
-}
-
 export async function deleteDocument(documentId, driveFileId = null) {
     return callBackend({ action: 'delete_document', documentId, driveFileId });
-}
-
-// ============================================================
-// QUERY (RAG)
-// ============================================================
-
-export async function queryDocuments(query, options = {}) {
-    return callBackend({
-        action: 'query',
-        query,
-        matchCount: options.matchCount || 8,
-        outputType: options.outputType || 'text',
-        filterPanel: options.filterPanel || null,
-        filterVoltage: options.filterVoltage || null,
-    });
 }
 
 // ============================================================
@@ -145,24 +139,16 @@ export async function syncDrive() {
 }
 
 // ============================================================
-// HEALTH CHECK
+// RAG QUERY
 // ============================================================
 
-export async function checkBackendHealth() {
-    const config = getConfig();
-    if (!config.GOOGLE_SCRIPT_URL) {
-        return { status: 'error', message: 'Google Script URL not configured' };
-    }
-
-    try {
-        const res = await fetch(config.GOOGLE_SCRIPT_URL, {
-            method: 'GET',
-            redirect: 'follow',
-        });
-        const text = await res.text();
-        const data = JSON.parse(text);
-        return { status: 'ok', ...data };
-    } catch (err) {
-        return { status: 'error', message: err.message };
-    }
+export async function queryRAG(query, options = {}) {
+    return callBackend({
+        action: 'query',
+        query,
+        outputType: options.outputType || 'text',
+        filterPanel: options.filterPanel || '',
+        filterVoltage: options.filterVoltage || '',
+        matchCount: options.matchCount || 8,
+    });
 }
