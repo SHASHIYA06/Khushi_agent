@@ -201,7 +201,7 @@ function processDocumentAction(data) {
 
     if (!text || text.trim().length < 10) {
       updateDocStatus(doc.id, "error", 0);
-      return jsonResp({ status: "error", message: "Could not extract text from file" });
+      return jsonResp({ error: "Could not extract text from '" + doc.name + "' (type: " + doc.file_type + "). Check Apps Script logs for details." });
     }
 
     Logger.log("Extracted " + text.length + " characters from " + doc.name);
@@ -576,17 +576,68 @@ function syncDriveFiles() {
 
 function extractTextFromFile(file, fileName) {
   var text = "";
+  var mimeType = file.getMimeType();
+  Logger.log("Extracting text from: " + fileName + " (type: " + mimeType + ")");
 
-  // Strategy 1: Direct text (txt, csv)
-  if (fileName.match(/\.(txt|csv|text)$/i)) {
+  // Strategy 0: Google-native files (Docs, Sheets, Slides)
+  if (mimeType === "application/vnd.google-apps.document") {
     try {
-      text = file.getBlob().getDataAsString();
+      var doc = DocumentApp.openById(file.getId());
+      text = doc.getBody().getText();
+      Logger.log("Google Doc extraction: " + text.length + " chars");
       if (text && text.trim().length > 10) return text;
-    } catch (e) {}
+    } catch (e) { Logger.log("Google Doc extraction failed: " + e.message); }
   }
 
-  // Strategy 2: Google Drive OCR
+  if (mimeType === "application/vnd.google-apps.spreadsheet") {
+    try {
+      var ss = SpreadsheetApp.openById(file.getId());
+      var allText = [];
+      ss.getSheets().forEach(function(sheet) {
+        var data = sheet.getDataRange().getValues();
+        data.forEach(function(row) {
+          allText.push(row.join(" | "));
+        });
+      });
+      text = allText.join("\n");
+      Logger.log("Google Sheet extraction: " + text.length + " chars");
+      if (text && text.trim().length > 10) return text;
+    } catch (e) { Logger.log("Google Sheet extraction failed: " + e.message); }
+  }
+
+  if (mimeType === "application/vnd.google-apps.presentation") {
+    try {
+      var pres = SlidesApp.openById(file.getId());
+      var slideTexts = [];
+      pres.getSlides().forEach(function(slide) {
+        slide.getShapes().forEach(function(shape) {
+          if (shape.getText) slideTexts.push(shape.getText().asString());
+        });
+      });
+      text = slideTexts.join("\n\n");
+      Logger.log("Google Slides extraction: " + text.length + " chars");
+      if (text && text.trim().length > 10) return text;
+    } catch (e) { Logger.log("Google Slides extraction failed: " + e.message); }
+  }
+
+  // For Google-native types, if we got here without text, skip blob-based strategies
+  if (mimeType.indexOf("application/vnd.google-apps") === 0) {
+    Logger.log("Google-native file, no more strategies available");
+    return text;
+  }
+
+  // Strategy 1: Direct text (txt, csv)
+  if (fileName.match(/\.(txt|csv|text|log|md|json|xml|html)$/i)) {
+    try {
+      text = file.getBlob().getDataAsString();
+      Logger.log("Direct text extraction: " + text.length + " chars");
+      if (text && text.trim().length > 10) return text;
+    } catch (e) { Logger.log("Direct text failed: " + e.message); }
+  }
+
+  // Strategy 2: Google Drive OCR (for PDFs and images)
   try {
+    Logger.log("Trying OCR...");
     var ocrFile = Drive.Files.insert(
       {
         title: fileName + "_ocr_temp",
@@ -597,26 +648,32 @@ function extractTextFromFile(file, fileName) {
     );
 
     if (ocrFile && ocrFile.id) {
-      var doc = DocumentApp.openById(ocrFile.id);
-      text = doc.getBody().getText();
+      var ocrDoc = DocumentApp.openById(ocrFile.id);
+      text = ocrDoc.getBody().getText();
       DriveApp.getFileById(ocrFile.id).setTrashed(true);
+      Logger.log("OCR extraction: " + text.length + " chars");
       if (text && text.trim().length > 10) return text;
     }
   } catch (e) {
     Logger.log("OCR failed: " + e.message);
   }
 
-  // Strategy 3: Gemini Vision for PDFs/images
+  // Strategy 3: Gemini Vision (for PDFs/images when OCR fails)
   try {
+    Logger.log("Trying Gemini Vision...");
     var bytes = file.getBlob().getBytes();
     if (bytes.length < 10 * 1024 * 1024) {
-      text = geminiExtractText(Utilities.base64Encode(bytes), file.getMimeType());
+      text = geminiExtractText(Utilities.base64Encode(bytes), mimeType);
+      Logger.log("Gemini Vision extraction: " + (text ? text.length : 0) + " chars");
       if (text && text.trim().length > 10) return text;
+    } else {
+      Logger.log("File too large for Gemini Vision: " + bytes.length + " bytes");
     }
   } catch (e) {
-    Logger.log("Gemini extract failed: " + e.message);
+    Logger.log("Gemini Vision failed: " + e.message);
   }
 
+  Logger.log("All extraction strategies exhausted. Text length: " + (text ? text.length : 0));
   return text;
 }
 
