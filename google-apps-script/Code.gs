@@ -860,31 +860,41 @@ function fallbackExtract(text) {
 // ============================================================
 
 function getGeminiEmbedding(text) {
-  const res = UrlFetchApp.fetch(
-    "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key=" + GEMINI_API_KEY,
-    {
-      method: "post",
-      contentType: "application/json",
-      payload: JSON.stringify({
-        content: { parts: [{ text: text.substring(0, 2000) }] }
-      }),
-      muteHttpExceptions: true
+  // Try models in order: text-embedding-004 (v1), embedding-001 (v1beta)
+  const models = [
+    { url: "https://generativelanguage.googleapis.com/v1/models/text-embedding-004:embedContent?key=" + GEMINI_API_KEY },
+    { url: "https://generativelanguage.googleapis.com/v1beta/models/embedding-001:embedContent?key=" + GEMINI_API_KEY }
+  ];
+
+  const payload = JSON.stringify({
+    content: { parts: [{ text: text.substring(0, 2000) }] }
+  });
+
+  for (const model of models) {
+    try {
+      const res = UrlFetchApp.fetch(model.url, {
+        method: "post",
+        contentType: "application/json",
+        payload: payload,
+        muteHttpExceptions: true
+      });
+
+      const statusCode = res.getResponseCode();
+      const raw = res.getContentText();
+
+      if (statusCode === 200) {
+        const result = JSON.parse(raw);
+        if (result.embedding && result.embedding.values) {
+          return result.embedding.values;
+        }
+      }
+      Logger.log("Embedding model attempt failed (" + statusCode + "): " + raw.substring(0, 200));
+    } catch (e) {
+      Logger.log("Embedding fetch error: " + e.message);
     }
-  );
-
-  const statusCode = res.getResponseCode();
-  const raw = res.getContentText();
-
-  if (statusCode !== 200) {
-    Logger.log("Embedding API error (" + statusCode + "): " + raw.substring(0, 300));
-    throw new Error("Embedding failed (HTTP " + statusCode + "): " + raw.substring(0, 150));
   }
 
-  const result = JSON.parse(raw);
-  if (!result.embedding || !result.embedding.values) {
-    throw new Error("Embedding response missing values: " + raw.substring(0, 200));
-  }
-  return result.embedding.values;
+  throw new Error("All embedding models failed. Check your GEMINI_API_KEY and ensure the Generative Language API is enabled.");
 }
 
 // ============================================================
