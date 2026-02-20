@@ -637,13 +637,15 @@ function extractTextFromFile(file, fileName) {
 
   // Strategy 2: Google Drive OCR (for PDFs and images)
   try {
-    Logger.log("Trying OCR...");
+    Logger.log("Trying OCR via Drive.Files.insert...");
+    var blob = file.getBlob();
+    blob.setName(fileName); // ensure blob has the correct name
     var ocrFile = Drive.Files.insert(
       {
         title: fileName + "_ocr_temp",
         mimeType: "application/vnd.google-apps.document"
       },
-      file.getBlob(),
+      blob,
       { ocr: true, ocrLanguage: "en" }
     );
 
@@ -655,13 +657,35 @@ function extractTextFromFile(file, fileName) {
       if (text && text.trim().length > 10) return text;
     }
   } catch (e) {
-    Logger.log("OCR failed: " + e.message);
+    Logger.log("Drive OCR failed: " + e.message + " | stack: " + e.stack);
+  }
+
+  // Strategy 2b: Copy-to-Docs conversion (alternative OCR)
+  if (mimeType === "application/pdf") {
+    try {
+      Logger.log("Trying PDF-to-Docs copy approach...");
+      var copyMeta = Drive.Files.copy(
+        { title: fileName + "_convert_temp", mimeType: "application/vnd.google-apps.document" },
+        file.getId(),
+        { ocr: true }
+      );
+      if (copyMeta && copyMeta.id) {
+        var convertedDoc = DocumentApp.openById(copyMeta.id);
+        text = convertedDoc.getBody().getText();
+        DriveApp.getFileById(copyMeta.id).setTrashed(true);
+        Logger.log("Copy-convert extraction: " + text.length + " chars");
+        if (text && text.trim().length > 10) return text;
+      }
+    } catch (e) {
+      Logger.log("Copy-convert failed: " + e.message);
+    }
   }
 
   // Strategy 3: Gemini Vision (for PDFs/images when OCR fails)
   try {
     Logger.log("Trying Gemini Vision...");
     var bytes = file.getBlob().getBytes();
+    Logger.log("File size: " + bytes.length + " bytes");
     if (bytes.length < 10 * 1024 * 1024) {
       text = geminiExtractText(Utilities.base64Encode(bytes), mimeType);
       Logger.log("Gemini Vision extraction: " + (text ? text.length : 0) + " chars");
@@ -678,28 +702,39 @@ function extractTextFromFile(file, fileName) {
 }
 
 function geminiExtractText(base64Data, mimeType) {
-  var res = UrlFetchApp.fetch(
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + GEMINI_API_KEY,
-    {
-      method: "post",
-      contentType: "application/json",
-      payload: JSON.stringify({
-        contents: [{
-          parts: [
-            { inline_data: { mime_type: mimeType, data: base64Data } },
-            { text: "Extract ALL text from this document. Include every word, number, label. Preserve structure. Do not summarize." }
-          ]
-        }],
-        generationConfig: { temperature: 0.1, maxOutputTokens: 8192 }
-      }),
-      muteHttpExceptions: true
-    }
-  );
+  var url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + GEMINI_API_KEY;
+  Logger.log("Gemini Vision API call, mimeType: " + mimeType + ", data size: " + base64Data.length + " chars");
 
-  var result = JSON.parse(res.getContentText());
-  if (result.candidates && result.candidates[0]) {
+  var res = UrlFetchApp.fetch(url, {
+    method: "post",
+    contentType: "application/json",
+    payload: JSON.stringify({
+      contents: [{
+        parts: [
+          { inline_data: { mime_type: mimeType, data: base64Data } },
+          { text: "Extract ALL text from this document. Include every word, number, label, table. Preserve structure. Do not summarize." }
+        ]
+      }],
+      generationConfig: { temperature: 0.1, maxOutputTokens: 8192 }
+    }),
+    muteHttpExceptions: true
+  });
+
+  var raw = res.getContentText();
+  var statusCode = res.getResponseCode();
+  Logger.log("Gemini Vision response status: " + statusCode);
+
+  if (statusCode !== 200) {
+    Logger.log("Gemini Vision API error: " + raw.substring(0, 500));
+    return "";
+  }
+
+  var result = JSON.parse(raw);
+  if (result.candidates && result.candidates[0] && result.candidates[0].content) {
     return result.candidates[0].content.parts[0].text;
   }
+
+  Logger.log("Gemini Vision: No candidates in response. " + raw.substring(0, 300));
   return "";
 }
 
