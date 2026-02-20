@@ -911,7 +911,7 @@ function getGeminiEmbedding(text) {
 }
 
 // ============================================================
-// RAG QUERY (hybrid: embedding similarity + keyword matching)
+// RAG QUERY (hybrid: embedding + keyword + Gemini re-ranking)
 // ============================================================
 
 function handleQuery(data) {
@@ -929,7 +929,7 @@ function handleQuery(data) {
     });
   }
 
-  // 2. Try embedding-based search first
+  // 2. Try embedding-based search
   let queryEmb = [];
   try {
     queryEmb = getGeminiEmbedding(data.query);
@@ -938,12 +938,12 @@ function handleQuery(data) {
   }
 
   const hasEmbeddings = queryEmb && queryEmb.length > 0;
-  Logger.log("Search mode: " + (hasEmbeddings ? "EMBEDDING" : "KEYWORD"));
+  Logger.log("Search mode: " + (hasEmbeddings ? "EMBEDDING+KEYWORD" : "KEYWORD"));
 
-  // 3. Score all chunks
+  // 3. Score all chunks with hybrid scoring
   const queryLower = data.query.toLowerCase();
   const queryWords = queryLower.split(/\s+/).filter(w => w.length > 2);
-  const matches = [];
+  const allScored = [];
 
   for (let i = 1; i < rawData.length; i++) {
     // Apply filters
@@ -951,28 +951,25 @@ function handleQuery(data) {
     if (data.filterVoltage && String(rawData[i][5]).toUpperCase().indexOf(data.filterVoltage.toUpperCase()) === -1) continue;
 
     const content = String(rawData[i][2]);
-    let similarity = 0;
+    let embScore = 0;
+    let kwScore = keywordScore(content, queryWords, queryLower);
 
     if (hasEmbeddings) {
-      // Try embedding similarity
       try {
         const chunkEmb = JSON.parse(rawData[i][8]);
         if (chunkEmb && chunkEmb.length > 0 && chunkEmb.length === queryEmb.length) {
-          similarity = cosineSimilarity(queryEmb, chunkEmb);
-        } else {
-          // Chunk has no embedding — use keyword score
-          similarity = keywordScore(content, queryWords, queryLower);
+          embScore = cosineSimilarity(queryEmb, chunkEmb);
         }
-      } catch (e) {
-        similarity = keywordScore(content, queryWords, queryLower);
-      }
-    } else {
-      // Pure keyword search
-      similarity = keywordScore(content, queryWords, queryLower);
+      } catch (e) { /* skip */ }
     }
 
-    if (similarity > 0.01) {
-      matches.push({
+    // Hybrid score: weighted combination
+    const hybridScore = hasEmbeddings
+      ? (embScore * 0.6 + kwScore * 0.4)
+      : kwScore;
+
+    if (hybridScore > 0.01) {
+      allScored.push({
         id: rawData[i][0],
         document_id: rawData[i][1],
         content: content,
@@ -981,26 +978,40 @@ function handleQuery(data) {
         voltage: rawData[i][5],
         components: safeParseJSON(rawData[i][6], []),
         connections: safeParseJSON(rawData[i][7], []),
-        similarity: Math.round(similarity * 1000) / 1000
+        similarity: Math.round(hybridScore * 1000) / 1000
       });
     }
   }
 
-  // 4. Sort by similarity and take top N
+  // 4. Sort by initial score and take top candidates for re-ranking
+  allScored.sort((a, b) => b.similarity - a.similarity);
+  const candidates = allScored.slice(0, 20); // Broad retrieval
+
+  Logger.log("Initial retrieval: " + allScored.length + " matches, top " + candidates.length + " for re-ranking");
+
+  // 5. Gemini re-ranking (if we have enough candidates)
   const matchCount = parseInt(data.matchCount) || 8;
-  matches.sort((a, b) => b.similarity - a.similarity);
-  const topMatches = matches.slice(0, matchCount);
+  let topMatches;
 
-  Logger.log("Found " + matches.length + " matches, returning top " + topMatches.length);
+  if (candidates.length > matchCount) {
+    topMatches = geminiRerank(data.query, candidates, matchCount);
+  } else {
+    topMatches = candidates.slice(0, matchCount);
+  }
 
-  // 5. Generate answer using Gemini Flash
+  Logger.log("After re-ranking: " + topMatches.length + " final matches");
+
+  // 6. Generate answer with enriched context
   let answer = "No relevant documents found for your query.";
   if (topMatches.length > 0) {
-    const context = topMatches.map(m => m.content).join("\n\n---\n\n");
+    const context = topMatches.map((m, i) =>
+      "[Source " + (i + 1) + " — Page " + (m.page_number || "?") +
+      (m.panel ? ", Panel " + m.panel : "") + "]\n" + m.content
+    ).join("\n\n---\n\n");
     answer = generateAnswer(data.query, context, data.outputType || "text");
   }
 
-  // 6. Log query
+  // 7. Log query
   try {
     const logSheet = getSheet("QueryLogs");
     logSheet.appendRow([
@@ -1016,30 +1027,111 @@ function handleQuery(data) {
     answer,
     matches: topMatches,
     matchCount: topMatches.length,
-    searchMode: hasEmbeddings ? "embedding" : "keyword"
+    searchMode: hasEmbeddings ? "hybrid" : "keyword"
   });
 }
 
 // ============================================================
-// KEYWORD SCORING (TF-IDF inspired)
+// GEMINI RE-RANKING
+// ============================================================
+
+function geminiRerank(query, candidates, topN) {
+  try {
+    // Build a compact representation for re-ranking
+    const snippets = candidates.map((c, i) =>
+      "CHUNK_" + i + ": " + c.content.substring(0, 400)
+    ).join("\n\n");
+
+    const prompt = "You are a relevance judge. Given a QUERY and numbered text CHUNKS, " +
+      "rank the chunks by relevance to the query. Return ONLY a JSON array of chunk indices " +
+      "in order of relevance (most relevant first). Example: [3,0,7,1,5]\n\n" +
+      "QUERY: " + query + "\n\nCHUNKS:\n" + snippets;
+
+    const result = callGemini(
+      [{ parts: [{ text: prompt }] }],
+      { temperature: 0, maxOutputTokens: 256 }
+    );
+
+    if (result) {
+      // Parse the ranked indices
+      const cleaned = result.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+      const indices = JSON.parse(cleaned);
+
+      if (Array.isArray(indices)) {
+        const reranked = [];
+        for (const idx of indices) {
+          if (typeof idx === "number" && idx >= 0 && idx < candidates.length) {
+            const match = candidates[idx];
+            match.similarity = Math.round((1.0 - reranked.length * 0.05) * 1000) / 1000;
+            reranked.push(match);
+            if (reranked.length >= topN) break;
+          }
+        }
+        if (reranked.length > 0) {
+          Logger.log("Gemini re-ranking succeeded: " + reranked.length + " results");
+          return reranked;
+        }
+      }
+    }
+  } catch (e) {
+    Logger.log("Re-ranking failed, using initial scores: " + e.message);
+  }
+
+  // Fallback: use initial scoring
+  return candidates.slice(0, topN);
+}
+
+// ============================================================
+// KEYWORD SCORING (enhanced TF-IDF with bigrams & proximity)
 // ============================================================
 
 function keywordScore(content, queryWords, fullQuery) {
   const contentLower = content.toLowerCase();
   let score = 0;
 
-  // Exact phrase match (highest value)
+  // 1. Exact phrase match (highest weight)
   if (contentLower.includes(fullQuery)) {
     score += 0.5;
   }
 
-  // Individual word matches
+  // 2. Individual word matches with frequency bonus
+  let matchedWords = 0;
   for (const word of queryWords) {
     if (contentLower.includes(word)) {
-      score += 0.15;
-      // Bonus for multiple occurrences
+      matchedWords++;
+      score += 0.1;
+      // Frequency bonus (capped)
       const count = (contentLower.split(word).length - 1);
-      if (count > 1) score += 0.05 * Math.min(count - 1, 3);
+      if (count > 1) score += 0.03 * Math.min(count - 1, 5);
+    }
+  }
+
+  // 3. Word coverage bonus (% of query words found)
+  if (queryWords.length > 0) {
+    const coverage = matchedWords / queryWords.length;
+    score += coverage * 0.2;
+  }
+
+  // 4. Bigram matching (consecutive word pairs)
+  for (let j = 0; j < queryWords.length - 1; j++) {
+    const bigram = queryWords[j] + " " + queryWords[j + 1];
+    if (contentLower.includes(bigram)) {
+      score += 0.15;
+    }
+  }
+
+  // 5. Proximity bonus: if multiple query words appear close together
+  if (matchedWords >= 2) {
+    const positions = [];
+    for (const word of queryWords) {
+      const pos = contentLower.indexOf(word);
+      if (pos >= 0) positions.push(pos);
+    }
+    if (positions.length >= 2) {
+      positions.sort((a, b) => a - b);
+      const span = positions[positions.length - 1] - positions[0];
+      if (span < 200) score += 0.1;
+      if (span < 100) score += 0.1;
     }
   }
 
