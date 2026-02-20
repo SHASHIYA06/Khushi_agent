@@ -860,45 +860,46 @@ function fallbackExtract(text) {
 // ============================================================
 
 function getGeminiEmbedding(text) {
-  // Try models in order: text-embedding-004 (v1), embedding-001 (v1beta)
+  // Try every known embedding endpoint
   const models = [
-    { url: "https://generativelanguage.googleapis.com/v1/models/text-embedding-004:embedContent?key=" + GEMINI_API_KEY },
-    { url: "https://generativelanguage.googleapis.com/v1beta/models/embedding-001:embedContent?key=" + GEMINI_API_KEY }
+    "https://generativelanguage.googleapis.com/v1/models/text-embedding-004:embedContent?key=" + GEMINI_API_KEY,
+    "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key=" + GEMINI_API_KEY,
+    "https://generativelanguage.googleapis.com/v1/models/embedding-001:embedContent?key=" + GEMINI_API_KEY,
+    "https://generativelanguage.googleapis.com/v1beta/models/embedding-001:embedContent?key=" + GEMINI_API_KEY
   ];
 
   const payload = JSON.stringify({
     content: { parts: [{ text: text.substring(0, 2000) }] }
   });
 
-  for (const model of models) {
+  for (const url of models) {
     try {
-      const res = UrlFetchApp.fetch(model.url, {
+      const res = UrlFetchApp.fetch(url, {
         method: "post",
         contentType: "application/json",
         payload: payload,
         muteHttpExceptions: true
       });
 
-      const statusCode = res.getResponseCode();
-      const raw = res.getContentText();
-
-      if (statusCode === 200) {
-        const result = JSON.parse(raw);
+      if (res.getResponseCode() === 200) {
+        const result = JSON.parse(res.getContentText());
         if (result.embedding && result.embedding.values) {
+          Logger.log("Embedding success via: " + url.split("models/")[1].split(":")[0]);
           return result.embedding.values;
         }
       }
-      Logger.log("Embedding model attempt failed (" + statusCode + "): " + raw.substring(0, 200));
     } catch (e) {
-      Logger.log("Embedding fetch error: " + e.message);
+      // try next
     }
   }
 
-  throw new Error("All embedding models failed. Check your GEMINI_API_KEY and ensure the Generative Language API is enabled.");
+  // Return empty array instead of throwing — query will use keyword search
+  Logger.log("All embedding models failed, returning empty. Keyword search will be used.");
+  return [];
 }
 
 // ============================================================
-// RAG QUERY (cosine similarity search)
+// RAG QUERY (hybrid: embedding similarity + keyword matching)
 // ============================================================
 
 function handleQuery(data) {
@@ -906,17 +907,30 @@ function handleQuery(data) {
 
   Logger.log("Query: " + data.query);
 
-  // 1. Get query embedding
-  let queryEmb;
+  // 1. Load all chunks
+  const chunkSheet = getSheet("Chunks");
+  const rawData = chunkSheet.getDataRange().getValues();
+
+  if (rawData.length <= 1) {
+    return jsonResp({
+      error: "No documents have been processed yet. Sync files from Drive then click Process on each document."
+    });
+  }
+
+  // 2. Try embedding-based search first
+  let queryEmb = [];
   try {
     queryEmb = getGeminiEmbedding(data.query);
   } catch (e) {
-    return jsonResp({ error: "Failed to generate query embedding: " + e.message });
+    Logger.log("Embedding failed, using keyword search: " + e.message);
   }
 
-  // 2. Load all chunks
-  const chunkSheet = getSheet("Chunks");
-  const rawData = chunkSheet.getDataRange().getValues();
+  const hasEmbeddings = queryEmb && queryEmb.length > 0;
+  Logger.log("Search mode: " + (hasEmbeddings ? "EMBEDDING" : "KEYWORD"));
+
+  // 3. Score all chunks
+  const queryLower = data.query.toLowerCase();
+  const queryWords = queryLower.split(/\s+/).filter(w => w.length > 2);
   const matches = [];
 
   for (let i = 1; i < rawData.length; i++) {
@@ -924,38 +938,57 @@ function handleQuery(data) {
     if (data.filterPanel && String(rawData[i][4]).toUpperCase().indexOf(data.filterPanel.toUpperCase()) === -1) continue;
     if (data.filterVoltage && String(rawData[i][5]).toUpperCase().indexOf(data.filterVoltage.toUpperCase()) === -1) continue;
 
-    try {
-      const chunkEmb = JSON.parse(rawData[i][8]);
-      if (!chunkEmb || chunkEmb.length === 0) continue; // Skip empty embeddings
+    const content = String(rawData[i][2]);
+    let similarity = 0;
 
-      const similarity = cosineSimilarity(queryEmb, chunkEmb);
+    if (hasEmbeddings) {
+      // Try embedding similarity
+      try {
+        const chunkEmb = JSON.parse(rawData[i][8]);
+        if (chunkEmb && chunkEmb.length > 0 && chunkEmb.length === queryEmb.length) {
+          similarity = cosineSimilarity(queryEmb, chunkEmb);
+        } else {
+          // Chunk has no embedding — use keyword score
+          similarity = keywordScore(content, queryWords, queryLower);
+        }
+      } catch (e) {
+        similarity = keywordScore(content, queryWords, queryLower);
+      }
+    } else {
+      // Pure keyword search
+      similarity = keywordScore(content, queryWords, queryLower);
+    }
 
+    if (similarity > 0.01) {
       matches.push({
         id: rawData[i][0],
         document_id: rawData[i][1],
-        content: rawData[i][2],
+        content: content,
         page_number: rawData[i][3],
         panel: rawData[i][4],
         voltage: rawData[i][5],
         components: safeParseJSON(rawData[i][6], []),
         connections: safeParseJSON(rawData[i][7], []),
-        similarity
+        similarity: Math.round(similarity * 1000) / 1000
       });
-    } catch (e) {
-      // Skip chunks with bad embeddings
     }
   }
 
-  // 3. Sort by similarity and take top N
+  // 4. Sort by similarity and take top N
   const matchCount = parseInt(data.matchCount) || 8;
   matches.sort((a, b) => b.similarity - a.similarity);
   const topMatches = matches.slice(0, matchCount);
 
-  // 4. Build context and generate answer
-  const context = topMatches.map(m => m.content).join("\n\n---\n\n");
-  const answer = generateAnswer(data.query, context, data.outputType || "text");
+  Logger.log("Found " + matches.length + " matches, returning top " + topMatches.length);
 
-  // 5. Log query
+  // 5. Generate answer using Gemini Flash
+  let answer = "No relevant documents found for your query.";
+  if (topMatches.length > 0) {
+    const context = topMatches.map(m => m.content).join("\n\n---\n\n");
+    answer = generateAnswer(data.query, context, data.outputType || "text");
+  }
+
+  // 6. Log query
   try {
     const logSheet = getSheet("QueryLogs");
     logSheet.appendRow([
@@ -970,8 +1003,36 @@ function handleQuery(data) {
   return jsonResp({
     answer,
     matches: topMatches,
-    matchCount: topMatches.length
+    matchCount: topMatches.length,
+    searchMode: hasEmbeddings ? "embedding" : "keyword"
   });
+}
+
+// ============================================================
+// KEYWORD SCORING (TF-IDF inspired)
+// ============================================================
+
+function keywordScore(content, queryWords, fullQuery) {
+  const contentLower = content.toLowerCase();
+  let score = 0;
+
+  // Exact phrase match (highest value)
+  if (contentLower.includes(fullQuery)) {
+    score += 0.5;
+  }
+
+  // Individual word matches
+  for (const word of queryWords) {
+    if (contentLower.includes(word)) {
+      score += 0.15;
+      // Bonus for multiple occurrences
+      const count = (contentLower.split(word).length - 1);
+      if (count > 1) score += 0.05 * Math.min(count - 1, 3);
+    }
+  }
+
+  // Normalize to 0-1 range
+  return Math.min(score, 1.0);
 }
 
 // ============================================================
