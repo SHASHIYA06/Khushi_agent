@@ -25,6 +25,14 @@ const DRIVE_FOLDER_ID = "PASTE_YOUR_DRIVE_FOLDER_ID_HERE";
 // Optional: set manually if you already have a database spreadsheet
 const SPREADSHEET_ID_OVERRIDE = "";
 
+// Gemini models to try in order (newest → oldest)
+const GEMINI_MODELS = [
+  "gemini-2.0-flash",
+  "gemini-2.5-flash-lite",
+  "gemini-2.5-flash",
+  "gemini-1.5-flash"
+];
+
 // ============================================================
 // DATABASE: Get or create the Google Sheet database
 // ============================================================
@@ -149,7 +157,7 @@ function routeAction(data) {
     case "list_folders":       return listFoldersAction();
     case "query":              return handleQuery(data);
     case "sync_drive":         return syncDriveFiles();
-    case "health":             return jsonResp({ status: "ok", version: "4.0", db: "sheets", runtime: "V8" });
+    case "health":             return jsonResp({ status: "ok", version: "4.1", db: "sheets", runtime: "V8" });
     default:                   return jsonResp({ error: "Unknown action: " + data.action });
   }
 }
@@ -157,6 +165,50 @@ function routeAction(data) {
 function jsonResp(data) {
   return ContentService.createTextOutput(JSON.stringify(data))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+// ============================================================
+// SHARED GEMINI API CALLER (auto-retries with multiple models)
+// ============================================================
+
+function callGemini(contents, config) {
+  config = config || {};
+  const temperature = config.temperature !== undefined ? config.temperature : 0.2;
+  const maxOutputTokens = config.maxOutputTokens || 4096;
+
+  for (const model of GEMINI_MODELS) {
+    try {
+      const url = "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent?key=" + GEMINI_API_KEY;
+      const res = UrlFetchApp.fetch(url, {
+        method: "post",
+        contentType: "application/json",
+        payload: JSON.stringify({
+          contents: contents,
+          generationConfig: { temperature, maxOutputTokens }
+        }),
+        muteHttpExceptions: true
+      });
+
+      const statusCode = res.getResponseCode();
+      if (statusCode === 200) {
+        const result = JSON.parse(res.getContentText());
+        if (result.candidates && result.candidates[0] && result.candidates[0].content) {
+          Logger.log("Gemini OK via model: " + model);
+          return result.candidates[0].content.parts[0].text;
+        }
+      } else if (statusCode === 404) {
+        Logger.log("Model " + model + " not found (404), trying next...");
+        continue;
+      } else {
+        Logger.log("Model " + model + " error (" + statusCode + "): " + res.getContentText().substring(0, 200));
+        continue;
+      }
+    } catch (e) {
+      Logger.log("Model " + model + " fetch error: " + e.message);
+    }
+  }
+
+  return null; // All models failed
 }
 
 // ============================================================
@@ -704,46 +756,22 @@ function extractTextFromFile(file, fileName) {
 // ============================================================
 
 function geminiExtractText(base64Data, mimeType) {
-  const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + GEMINI_API_KEY;
   Logger.log("Gemini Vision call: mimeType=" + mimeType + ", dataSize=" + base64Data.length);
 
-  const payload = {
-    contents: [{
-      parts: [
-        { inline_data: { mime_type: mimeType, data: base64Data } },
-        { text: "Extract ALL text from this document completely. Include every word, number, label, heading, table cell, and caption. Preserve the document structure. Do NOT summarize. Output raw text only." }
-      ]
-    }],
-    generationConfig: { temperature: 0, maxOutputTokens: 8192 }
-  };
+  const contents = [{
+    parts: [
+      { inline_data: { mime_type: mimeType, data: base64Data } },
+      { text: "Extract ALL text from this document completely. Include every word, number, label, heading, table cell, and caption. Preserve the document structure. Do NOT summarize. Output raw text only." }
+    ]
+  }];
 
-  const res = UrlFetchApp.fetch(url, {
-    method: "post",
-    contentType: "application/json",
-    payload: JSON.stringify(payload),
-    muteHttpExceptions: true
-  });
-
-  const statusCode = res.getResponseCode();
-  const raw = res.getContentText();
-  Logger.log("Gemini Vision status: " + statusCode);
-
-  if (statusCode !== 200) {
-    Logger.log("Gemini Vision ERROR: " + raw.substring(0, 500));
-    return "";
+  const result = callGemini(contents, { temperature: 0, maxOutputTokens: 8192 });
+  if (result) {
+    Logger.log("Gemini Vision extracted: " + result.length + " chars");
+    return result;
   }
 
-  try {
-    const result = JSON.parse(raw);
-    if (result.candidates && result.candidates[0] && result.candidates[0].content) {
-      const extractedText = result.candidates[0].content.parts[0].text;
-      Logger.log("Gemini Vision extracted: " + extractedText.length + " chars");
-      return extractedText;
-    }
-    Logger.log("Gemini Vision: no candidates. Response: " + raw.substring(0, 300));
-  } catch (e) {
-    Logger.log("Gemini Vision parse error: " + e.message);
-  }
+  Logger.log("Gemini Vision: all models failed");
   return "";
 }
 
@@ -814,30 +842,14 @@ function extractEngineeringData(text) {
     'Text:\n' + text.substring(0, 2000);
 
   try {
-    const res = UrlFetchApp.fetch(
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + GEMINI_API_KEY,
-      {
-        method: "post",
-        contentType: "application/json",
-        payload: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.1, maxOutputTokens: 512 }
-        }),
-        muteHttpExceptions: true
-      }
+    const result = callGemini(
+      [{ parts: [{ text: prompt }] }],
+      { temperature: 0.1, maxOutputTokens: 512 }
     );
 
-    const statusCode = res.getResponseCode();
-    if (statusCode !== 200) {
-      Logger.log("Extraction API error: " + statusCode);
-      return fallbackExtract(text);
-    }
+    if (!result) return fallbackExtract(text);
 
-    const output = JSON.parse(res.getContentText());
-    if (!output.candidates || !output.candidates[0]) return fallbackExtract(text);
-
-    let t = output.candidates[0].content.parts[0].text;
-    t = t.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+    let t = result.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
     return JSON.parse(t);
   } catch (e) {
     Logger.log("Extraction error: " + e.message);
@@ -1071,30 +1083,15 @@ function generateAnswer(query, context, outputType) {
 
   prompt += "\n\nCONTEXT:\n" + context.substring(0, 10000) + "\n\nQUERY:\n" + query;
 
-  const res = UrlFetchApp.fetch(
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + GEMINI_API_KEY,
-    {
-      method: "post",
-      contentType: "application/json",
-      payload: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.2, maxOutputTokens: 4096 }
-      }),
-      muteHttpExceptions: true
-    }
+  const result = callGemini(
+    [{ parts: [{ text: prompt }] }],
+    { temperature: 0.2, maxOutputTokens: 4096 }
   );
 
-  const statusCode = res.getResponseCode();
-  if (statusCode !== 200) {
-    Logger.log("Answer generation error: " + statusCode + " " + res.getContentText().substring(0, 300));
-    return "Unable to generate answer. API returned HTTP " + statusCode;
+  if (!result) {
+    return "Unable to generate answer. All Gemini models returned errors. Please check your API key.";
   }
-
-  const result = JSON.parse(res.getContentText());
-  if (!result.candidates || !result.candidates[0]) {
-    return "Unable to generate answer. No candidates in response.";
-  }
-  return result.candidates[0].content.parts[0].text;
+  return result;
 }
 
 // ============================================================
