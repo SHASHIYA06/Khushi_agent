@@ -5,11 +5,12 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useDropzone } from 'react-dropzone';
 import AppShell from '@/components/layout/AppShell';
 import useStore from '@/store/useStore';
-import { listFolders, createFolder, deleteFolder, listDocuments, uploadDocument, deleteDocument, syncDrive } from '@/lib/api';
+import { listFolders, createFolder, deleteFolder, listDocuments, uploadDocument, deleteDocument, processDocument, syncDrive } from '@/lib/api';
 import {
     HiOutlineFolder, HiOutlineFolderAdd, HiOutlineDocumentText,
     HiOutlineTrash, HiOutlineUpload, HiOutlineX, HiOutlineEye,
-    HiOutlineRefresh, HiOutlineDocumentAdd, HiOutlineExclamationCircle
+    HiOutlineRefresh, HiOutlineDocumentAdd, HiOutlineExclamationCircle,
+    HiOutlineLightningBolt
 } from 'react-icons/hi';
 
 export default function DocumentsPage() {
@@ -22,6 +23,7 @@ export default function DocumentsPage() {
     const [loading, setLoading] = useState(false);
     const [syncing, setSyncing] = useState(false);
     const [error, setError] = useState('');
+    const [processingId, setProcessingId] = useState(null);
 
     useEffect(() => {
         loadData();
@@ -356,6 +358,31 @@ export default function DocumentsPage() {
                                                 </td>
                                                 <td className="p-4 text-right">
                                                     <div className="flex items-center justify-end gap-2">
+                                                        {(doc.status === 'uploaded' || doc.status === 'error') && (
+                                                            <button
+                                                                onClick={async (e) => {
+                                                                    e.stopPropagation();
+                                                                    setProcessingId(doc.id);
+                                                                    try {
+                                                                        const res = await processDocument(doc.id);
+                                                                        addNotification(`Processed: ${doc.name} — ${res.chunksProcessed || 0} chunks`, 'success');
+                                                                        await loadData();
+                                                                    } catch (err) {
+                                                                        addNotification('Process failed: ' + err.message, 'error');
+                                                                    }
+                                                                    setProcessingId(null);
+                                                                }}
+                                                                className="p-2 rounded-lg hover:bg-emerald-500/10 transition-colors"
+                                                                style={{ color: 'var(--accent-emerald)' }}
+                                                                title="Process: Extract text & create chunks"
+                                                                disabled={processingId === doc.id}
+                                                            >
+                                                                {processingId === doc.id
+                                                                    ? <HiOutlineRefresh size={16} className="animate-spin" />
+                                                                    : <HiOutlineLightningBolt size={16} />
+                                                                }
+                                                            </button>
+                                                        )}
                                                         {doc.drive_file_id && (
                                                             <button
                                                                 onClick={() => setPreviewDoc(doc)}

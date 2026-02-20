@@ -130,6 +130,10 @@ export async function deleteDocument(documentId, driveFileId = null) {
     return callBackend({ action: 'delete_document', documentId, driveFileId });
 }
 
+export async function processDocument(documentId) {
+    return callBackend({ action: 'process_document', documentId });
+}
+
 // ============================================================
 // DRIVE SYNC
 // ============================================================

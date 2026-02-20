@@ -140,23 +140,124 @@ function doGet(e) {
 
 function routeAction(data) {
   switch (data.action) {
-    case "init_db":         return initDB();
-    case "upload":          return uploadFile(data);
-    case "list_documents":  return listDocuments(data);
-    case "delete_document": return deleteDocumentAction(data);
-    case "create_folder":   return createFolderAction(data);
-    case "delete_folder":   return deleteFolderAction(data);
-    case "list_folders":    return listFoldersAction();
-    case "query":           return handleQuery(data);
-    case "sync_drive":      return syncDriveFiles();
-    case "health":          return jsonResp({ status: "ok", version: "3.0", db: "sheets" });
-    default:                return jsonResp({ error: "Unknown action: " + data.action });
+    case "init_db":            return initDB();
+    case "upload":             return uploadFile(data);
+    case "list_documents":     return listDocuments(data);
+    case "delete_document":    return deleteDocumentAction(data);
+    case "process_document":   return processDocumentAction(data);
+    case "create_folder":      return createFolderAction(data);
+    case "delete_folder":      return deleteFolderAction(data);
+    case "list_folders":       return listFoldersAction();
+    case "query":              return handleQuery(data);
+    case "sync_drive":         return syncDriveFiles();
+    case "health":             return jsonResp({ status: "ok", version: "3.0", db: "sheets" });
+    default:                   return jsonResp({ error: "Unknown action: " + data.action });
   }
 }
 
 function jsonResp(data) {
   return ContentService.createTextOutput(JSON.stringify(data))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+// ============================================================
+// PROCESS DOCUMENT (for synced files that need chunking)
+// ============================================================
+
+function processDocumentAction(data) {
+  if (!data.documentId) return jsonResp({ error: "Document ID required" });
+
+  try {
+    // Find document in sheet
+    var docSheet = getSheet("Documents");
+    var docData = docSheet.getDataRange().getValues();
+    var docRow = -1;
+    var doc = null;
+
+    for (var i = 1; i < docData.length; i++) {
+      if (docData[i][0] === data.documentId) {
+        docRow = i + 1;
+        doc = {
+          id: docData[i][0],
+          name: docData[i][1],
+          drive_file_id: docData[i][3],
+          file_type: docData[i][4]
+        };
+        break;
+      }
+    }
+
+    if (!doc) return jsonResp({ error: "Document not found" });
+    if (!doc.drive_file_id) return jsonResp({ error: "No Drive file linked" });
+
+    // Update status to processing
+    docSheet.getRange(docRow, 6).setValue("processing");
+
+    // Get the file from Drive
+    var file = DriveApp.getFileById(doc.drive_file_id);
+
+    // Extract text
+    var text = extractTextFromFile(file, doc.name);
+
+    if (!text || text.trim().length < 10) {
+      updateDocStatus(doc.id, "error", 0);
+      return jsonResp({ status: "error", message: "Could not extract text from file" });
+    }
+
+    Logger.log("Extracted " + text.length + " characters from " + doc.name);
+
+    // Delete old chunks if any
+    deleteChunksByDocId(doc.id);
+
+    // Chunk the text
+    var chunks = engineeringChunk(text);
+    Logger.log("Created " + chunks.length + " chunks");
+
+    // Process each chunk
+    var chunkSheet = getSheet("Chunks");
+    var processedCount = 0;
+
+    for (var j = 0; j < chunks.length; j++) {
+      try {
+        var extraction = extractEngineeringData(chunks[j]);
+        var embedding = getGeminiEmbedding(chunks[j]);
+
+        chunkSheet.appendRow([
+          Utilities.getUuid(),
+          doc.id,
+          chunks[j],
+          j + 1,
+          extraction.panel || "",
+          extraction.voltage || "",
+          JSON.stringify(extraction.components || []),
+          JSON.stringify(extraction.connections || []),
+          JSON.stringify(embedding),
+          new Date().toISOString()
+        ]);
+        processedCount++;
+      } catch (chunkErr) {
+        Logger.log("Chunk " + j + " error: " + chunkErr.message);
+      }
+
+      // Avoid timeout
+      if (j > 0 && j % 3 === 0) Utilities.sleep(500);
+    }
+
+    // Update status
+    updateDocStatus(doc.id, "indexed", processedCount);
+
+    return jsonResp({
+      status: "indexed",
+      documentId: doc.id,
+      chunksProcessed: processedCount,
+      totalChunks: chunks.length,
+      textLength: text.length
+    });
+
+  } catch (err) {
+    Logger.log("Process error: " + err.message + "\n" + err.stack);
+    return jsonResp({ error: "Processing failed: " + err.message });
+  }
 }
 
 // ============================================================
