@@ -273,6 +273,15 @@ export default function QueryPage() {
                 {/* Results */}
                 {queryResult && (
                     <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
+                        <div className="flex items-center gap-3 mb-4">
+                            <div className="status-badge success px-3 py-1 flex items-center gap-2">
+                                <span className="w-2 h-2 rounded-full animate-pulse bg-emerald-400" />
+                                Matrix Intelligence: {queryResult.searchMode === 'hybrid' ? 'Neural + Semantic' : 'Keyword Only'}
+                            </div>
+                            <div className="text-xs opacity-40">
+                                Matches: {queryResult.matchCount} | Agents: Active
+                            </div>
+                        </div>
                         {/* Output tabs */}
                         <div className="flex gap-2 mb-4">
                             {tabs.map((tab) => {
