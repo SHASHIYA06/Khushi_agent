@@ -1574,9 +1574,12 @@ function agentRouter(query) {
     if (res) {
       const cleaned = res.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
       const parsed = JSON.parse(cleaned);
-      // Hardcoded fallback for cable keywords to ensure quality
+      // Hardcoded fallback for keywords to ensure high-quality retrieval
+      parsed.expandedKeywords = parsed.expandedKeywords || [];
       if (parsed.intent === "CABLE_DETAILS") {
         parsed.expandedKeywords = [...new Set([...parsed.expandedKeywords, "core", "sqmm", "wire", "cable", "armor", "screen", "rating", "current"])];
+      } else if (parsed.intent === "SCHEMATIC") {
+        parsed.expandedKeywords = [...new Set([...parsed.expandedKeywords, "SLD", "drawing", "circuit", "connection", "feeder", "breaker", "busbar"])];
       }
       return parsed;
     }
