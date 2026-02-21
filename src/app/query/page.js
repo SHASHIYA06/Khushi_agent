@@ -84,59 +84,79 @@ export default function QueryPage() {
         setLoading(false);
     }
 
+    // Logic: Electrical Hierarchy Positioner
+    const LEVELS = { TRANSFORMER: 0, BUSBAR: 0, ACB: 1, MCCB: 2, RELAY: 3, MOTOR: 4, DEFAULT: 2 };
+
     function buildDiagram(matches) {
         const newNodes = [];
         const newEdges = [];
         const nodeMap = new Map();
-        let yOffset = 0;
 
-        matches.forEach((match, mIdx) => {
+        // 1. Group by electrical levels
+        const levelGroups = [[], [], [], [], []];
+
+        matches.forEach((match) => {
             const comps = match.components || [];
+            comps.forEach(label => {
+                if (nodeMap.has(label)) return;
+                const upper = label.toUpperCase();
+                let level = LEVELS.DEFAULT;
+                for (const [k, v] of Object.entries(LEVELS)) {
+                    if (upper.includes(k)) { level = v; break; }
+                }
+                levelGroups[level].push(label);
+                nodeMap.set(label, true); // Temporarily mark as seen
+            });
+        });
+
+        // 2. Position nodes based on hierarchy
+        let currentIdx = 0;
+        levelGroups.forEach((group, level) => {
+            group.forEach((label, i) => {
+                const nodeId = `qn-${currentIdx}-${label.replace(/\s+/g, '_')}`;
+                const xOffset = group.length > 1 ? (i - (group.length - 1) / 2) * 280 : 0;
+                const x = 500 + xOffset;
+                const y = level * 200;
+
+                nodeMap.set(label, nodeId);
+                newNodes.push({
+                    id: nodeId,
+                    data: { label },
+                    position: { x, y },
+                    style: {
+                        background: '#3b82f615',
+                        border: '2px solid #3b82f6',
+                        borderRadius: '12px',
+                        padding: '12px',
+                        color: '#f8fafc',
+                        fontSize: '11px',
+                        fontWeight: '600',
+                        minWidth: '160px',
+                        textAlign: 'center'
+                    }
+                });
+                currentIdx++;
+            });
+        });
+
+        // 3. Create edges from connections
+        matches.forEach(match => {
             const conns = match.connections || [];
-
-            comps.forEach((comp, cIdx) => {
-                const label = typeof comp === 'string' ? comp : comp.type || comp.label || 'Unknown';
-                const nodeId = `${mIdx}-${cIdx}-${label}`;
-
-                if (!nodeMap.has(label)) {
-                    nodeMap.set(label, nodeId);
-                    newNodes.push({
-                        id: nodeId,
-                        data: { label },
-                        position: { x: cIdx * 220, y: yOffset },
-                        style: {
-                            background: `${getNodeColor(label)}22`,
-                            border: `2px solid ${getNodeColor(label)}`,
-                            borderRadius: '12px',
-                            padding: '12px 18px',
-                            color: '#f1f5f9',
-                            fontSize: '13px',
-                            fontWeight: '600',
-                        },
-                    });
-                }
-            });
-
-            conns.forEach((conn, eIdx) => {
-                const sourceLabel = typeof conn.from === 'string' ? conn.from : '';
-                const targetLabel = typeof conn.to === 'string' ? conn.to : '';
-                const sourceId = nodeMap.get(sourceLabel);
-                const targetId = nodeMap.get(targetLabel);
-
-                if (sourceId && targetId && sourceId !== targetId) {
+            conns.forEach((conn, i) => {
+                const s = nodeMap.get(conn.from);
+                const t = nodeMap.get(conn.to);
+                if (s && t && s !== t) {
                     newEdges.push({
-                        id: `e-${mIdx}-${eIdx}`,
-                        source: sourceId,
-                        target: targetId,
+                        id: `qe-${currentIdx}-${i}`,
+                        source: s,
+                        target: t,
                         animated: true,
+                        label: conn.label || conn.cable || conn.cable_id || '',
                         style: { stroke: '#06b6d4', strokeWidth: 2 },
-                        label: conn.label || '',
-                        labelStyle: { fill: '#94a3b8', fontSize: 11 },
+                        markerEnd: { type: 'arrowclosed', color: '#06b6d4' }
                     });
                 }
             });
-
-            yOffset += 180;
         });
 
         setNodes(newNodes);
