@@ -41,36 +41,69 @@ function getNodeColor(label) {
 }
 
 // ── Layout helpers ──
+// ── Layout helpers: Hierarchical "Matrix" Layout ──
 function autoLayout(components, connections) {
     const nodes = [];
     const edges = [];
     const nodeMap = new Map();
-    const cols = Math.max(3, Math.ceil(Math.sqrt(components.length)));
+
+    // Heuristic levels for electrical hierarchy
+    const LEVELS = {
+        TRANSFORMER: 0, BUSBAR: 0,
+        ACB: 1, VCB: 1, ISOLATOR: 1,
+        MCCB: 2, MCB: 2, FUSE: 2,
+        RELAY: 3, CONTACTOR: 3, PLC: 3, STARTER: 3,
+        MOTOR: 4, CAPACITOR: 4, CABLE: 4, CT: 4, PT: 4,
+        DEFAULT: 2
+    };
+
+    const levelGroups = [[], [], [], [], []];
 
     components.forEach((comp, i) => {
         const label = typeof comp === 'string' ? comp : comp.type || comp.label || 'Unknown';
-        const id = `n-${i}-${label.replace(/\s+/g, '_')}`;
-        const color = getNodeColor(label);
-        const col = i % cols;
-        const row = Math.floor(i / cols);
+        const upper = label.toUpperCase();
+        let level = LEVELS.DEFAULT;
 
-        nodeMap.set(label, id);
-        nodes.push({
-            id,
-            data: { label },
-            position: { x: col * 240 + (row % 2 === 1 ? 120 : 0), y: row * 160 },
-            style: {
-                background: `${color}15`,
-                border: `2px solid ${color}`,
-                borderRadius: '14px',
-                padding: '14px 20px',
-                color: '#f1f5f9',
-                fontSize: '13px',
-                fontWeight: '700',
-                boxShadow: `0 0 20px ${color}22`,
-                minWidth: '120px',
-                textAlign: 'center',
-            },
+        for (const [key, val] of Object.entries(LEVELS)) {
+            if (upper.includes(key)) {
+                level = val;
+                break;
+            }
+        }
+        levelGroups[level].push(label);
+    });
+
+    // Position nodes based on levels
+    let currentIdx = 0;
+    levelGroups.forEach((group, level) => {
+        group.forEach((label, i) => {
+            const id = `n-${currentIdx}-${label.replace(/\s+/g, '_')}`;
+            const color = getNodeColor(label);
+
+            // Calculate position with staggering
+            const xOffset = group.length > 1 ? (i - (group.length - 1) / 2) * 280 : 0;
+            const x = 500 + xOffset;
+            const y = level * 200;
+
+            nodeMap.set(label, id);
+            nodes.push({
+                id,
+                data: { label },
+                position: { x, y },
+                style: {
+                    background: `${color}15`,
+                    border: `2px solid ${color}`,
+                    borderRadius: '14px',
+                    padding: '14px 20px',
+                    color: '#f1f5f9',
+                    fontSize: '13px',
+                    fontWeight: '700',
+                    boxShadow: `0 0 20px ${color}22`,
+                    minWidth: '160px',
+                    textAlign: 'center',
+                },
+            });
+            currentIdx++;
         });
     });
 

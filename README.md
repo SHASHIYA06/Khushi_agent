@@ -1,15 +1,17 @@
-# 🚇 MetroCircuit AI v5.0
-### Advanced Electrical Drawing Intelligence & RAG System
+# 🚇 MetroCircuit AI v6.2 (Multi-Agent RAG)
+### Advanced Electrical Drawing Intelligence & Matrix Analytics Engine
 
-MetroCircuit AI is a high-performance RAG (Retrieval-Augmented Generation) system specifically engineered for processing massive electrical schematics and circuit diagrams. It utilizes a custom **Batch-Processing Pipeline** to bypass Google Apps Script limitations, enabling seamless ingestion of 100+ page PDFs.
+MetroCircuit AI is a high-performance RAG (Retrieval-Augmented Generation) system specifically engineered for processing massive electrical schematics and circuit diagrams. It utilizes a custom **Multi-Agent Pipeline** and a **Batch-Processing Engine** to enable high-accuracy analysis of technical drawings.
 
 ---
 
-## 🚀 Batch Processing Upgrade (v5.0)
-The latest version introduces a breakthrough in document processing for large-scale engineering drawings:
-- **Time-Guarded Batching**: Processes documents in segments to survive the 6-minute GAS timeout.
-- **Page-Level Logic**: Respects drawing boundaries by splitting PDFs into discrete page-based chunks.
-- **Hybrid Retrieval**: Combines state-of-the-art Gemini Embeddings with keyword-density bigram matching.
+## 🚀 Matrix Analytics Upgrade (v6.2)
+The latest version introduces advanced "Multi-Agent" reasoning:
+- **Router Agent**: Automatically classifies query intent and expands engineering keywords (e.g., mapping "cables" to wiring specs).
+- **Verification Agent**: Post-processes answers to ensure citations, prevent hallucinations, and verify cable details.
+- **Scoped Search**: Target specific Folders or Documents directly from the Query UI.
+- **Robust API Handling**: Seamlessly fallbacks between Gemini v1/v1beta endpoints to prevent API timeout errors.
+- **Security Hardening**: Secrets are now managed via `PropertiesService` (Google) and GitHub Secrets, removing all hardcoded keys.
 - **Dynamic Progress**: Real-time frontend polling with page-by-page progress bars.
 
 ---
