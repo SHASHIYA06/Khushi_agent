@@ -7,10 +7,9 @@
 // SETUP:
 // 1. Create new Apps Script project at script.google.com
 // 2. Paste this entire code
-// 3. Set GEMINI_API_KEY and DRIVE_FOLDER_ID below
+// 3. Set GEMINI_API_KEY & DRIVE_FOLDER_ID in Project Settings -> Script Properties
 // 4. Enable "Drive API" v2 in Services (+ icon in sidebar)
-// 5. In Project Settings → enable "V8" runtime
-// 6. In appsscript.json → ensure "runtimeVersion": "V8"
+// 5. In appsscript.json -> ensure "runtimeVersion": "V8"
 // 7. Deploy → New Deployment → Web App
 //    - Execute as: Me | Access: Anyone
 // 8. Copy deployment URL to MetroCircuit Settings page
