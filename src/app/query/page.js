@@ -48,8 +48,8 @@ export default function QueryPage() {
     const { folders, documents, addNotification, queryResult, setQueryResult } = useStore();
     const [query, setQuery] = useState('');
     const [loading, setLoading] = useState(false);
-    const [activeTab, setActiveTab] = useState('text');
-    const [outputType, setOutputType] = useState('text');
+    const [outputType, setOutputType] = useState('text'); // text, json, wiring, schematic
+    const [activeTab, setActiveTab] = useState('text'); // text, json, diagram
     const [selectedFolderId, setSelectedFolderId] = useState('');
     const [selectedDocId, setSelectedDocId] = useState('');
     const [filterPanel, setFilterPanel] = useState('');
@@ -170,20 +170,20 @@ export default function QueryPage() {
                 {/* Query Input Area */}
                 <div className="glass-card p-6 mb-6">
                     {/* Output type selector */}
-                    <div className="flex flex-wrap gap-2 mb-4">
-                        {outputTypes.map((t) => (
-                            <button
-                                key={t.value}
-                                className={`tab-btn ${outputType === t.value ? 'active' : ''}`}
-                                onClick={() => setOutputType(t.value)}
-                            >
-                                {t.label}
-                            </button>
-                        ))}
-                    </div>
-
-                    {/* Target Selection & Filters */}
                     <div className="flex flex-wrap gap-4 mb-4 items-end">
+                        <div className="flex-1 min-w-[200px]">
+                            <label className="block text-xs font-bold mb-1 ml-1" style={{ color: 'var(--text-secondary)' }}>Output Strategy</label>
+                            <select
+                                className="input-field w-full text-sm"
+                                value={outputType}
+                                onChange={(e) => setOutputType(e.target.value)}
+                            >
+                                <option value="text">General Analysis</option>
+                                <option value="wiring">Wiring Details (Expert)</option>
+                                <option value="schematic">Schematic Structure</option>
+                                <option value="json">Structured JSON</option>
+                            </select>
+                        </div>
                         <div className="flex-1 min-w-[200px]">
                             <label className="block text-xs font-bold mb-1 ml-1" style={{ color: 'var(--text-secondary)' }}>Target Folder</label>
                             <select
