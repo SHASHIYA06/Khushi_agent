@@ -45,11 +45,13 @@ function getNodeColor(label) {
 }
 
 export default function QueryPage() {
-    const { addNotification, queryResult, setQueryResult } = useStore();
+    const { folders, documents, addNotification, queryResult, setQueryResult } = useStore();
     const [query, setQuery] = useState('');
     const [loading, setLoading] = useState(false);
     const [activeTab, setActiveTab] = useState('text');
     const [outputType, setOutputType] = useState('text');
+    const [selectedFolderId, setSelectedFolderId] = useState('');
+    const [selectedDocId, setSelectedDocId] = useState('');
     const [filterPanel, setFilterPanel] = useState('');
     const [filterVoltage, setFilterVoltage] = useState('');
     const [showFilters, setShowFilters] = useState(false);
@@ -63,11 +65,14 @@ export default function QueryPage() {
         try {
             const result = await queryRAG(query, {
                 outputType,
+                folderId: selectedFolderId || null,
+                documentId: selectedDocId || null,
                 filterPanel: filterPanel || null,
                 filterVoltage: filterVoltage || null,
+                matchCount: 15,
             });
             setQueryResult(result);
-            addNotification('Query completed', 'success');
+            addNotification('Matrix Intelligence Query completed', 'success');
 
             // Build diagram from matches
             if (result.matches) {
@@ -177,15 +182,53 @@ export default function QueryPage() {
                         ))}
                     </div>
 
+                    {/* Target Selection & Filters */}
+                    <div className="flex flex-wrap gap-4 mb-4 items-end">
+                        <div className="flex-1 min-w-[200px]">
+                            <label className="block text-xs font-bold mb-1 ml-1" style={{ color: 'var(--text-secondary)' }}>Target Folder</label>
+                            <select
+                                className="input-field w-full text-sm"
+                                value={selectedFolderId}
+                                onChange={(e) => setSelectedFolderId(e.target.value)}
+                            >
+                                <option value="">All Folders</option>
+                                {folders.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
+                            </select>
+                        </div>
+                        <div className="flex-1 min-w-[200px]">
+                            <label className="block text-xs font-bold mb-1 ml-1" style={{ color: 'var(--text-secondary)' }}>Target Document</label>
+                            <select
+                                className="input-field w-full text-sm"
+                                value={selectedDocId}
+                                onChange={(e) => setSelectedDocId(e.target.value)}
+                            >
+                                <option value="">All Documents</option>
+                                {documents.filter(d => !selectedFolderId || d.folder_id === selectedFolderId).map(d => (
+                                    <option key={d.id} value={d.id}>{d.name}</option>
+                                ))}
+                            </select>
+                        </div>
+                        <button
+                            onClick={() => setShowFilters(!showFilters)}
+                            className={`p-2.5 rounded-xl border transition-all ${showFilters ? 'bg-cyan-500/10 border-cyan-500/50' : 'bg-white/5 border-white/10'}`}
+                            title="Advanced Filters"
+                        >
+                            <HiOutlineFilter size={20} style={{ color: showFilters ? 'var(--accent-cyan)' : 'var(--text-secondary)' }} />
+                        </button>
+                    </div>
+
                     {/* Query input */}
                     <div className="flex gap-3">
-                        <input
-                            className="input-field flex-1"
-                            placeholder="Ask about your circuit drawings... e.g., 'Show me traction feeder panel wiring details'"
-                            value={query}
-                            onChange={(e) => setQuery(e.target.value)}
-                            onKeyDown={(e) => e.key === 'Enter' && handleQuery()}
-                        />
+                        <div className="relative flex-1">
+                            <input
+                                className="input-field w-full pl-10"
+                                placeholder="Ask about your circuit drawings... e.g., 'Show me traction feeder panel wiring details'"
+                                value={query}
+                                onChange={(e) => setQuery(e.target.value)}
+                                onKeyDown={(e) => e.key === 'Enter' && handleQuery()}
+                            />
+                            <HiOutlineSearch className="absolute left-3 top-1/2 -translate-y-1/2 opacity-30" size={18} />
+                        </div>
                         <button
                             onClick={handleQuery}
                             disabled={loading || !query.trim()}

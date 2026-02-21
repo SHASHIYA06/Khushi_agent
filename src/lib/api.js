@@ -195,5 +195,7 @@ export async function queryRAG(query, options = {}) {
         filterPanel: options.filterPanel || '',
         filterVoltage: options.filterVoltage || '',
         matchCount: options.matchCount || 8,
+        folderId: options.folderId || null,
+        documentId: options.documentId || null,
     });
 }

@@ -101,9 +101,11 @@ function autoLayout(components, connections) {
 }
 
 export default function DiagramPage() {
-    const { addNotification } = useStore();
+    const { folders, documents, addNotification } = useStore();
     const [searchQuery, setSearchQuery] = useState('');
     const [loading, setLoading] = useState(false);
+    const [selectedFolderId, setSelectedFolderId] = useState('');
+    const [selectedDocId, setSelectedDocId] = useState('');
     const [diagramTitle, setDiagramTitle] = useState('');
     const [componentCount, setComponentCount] = useState(0);
     const [connectionCount, setConnectionCount] = useState(0);
@@ -119,7 +121,9 @@ export default function DiagramPage() {
         try {
             const result = await queryRAG(searchQuery, {
                 outputType: 'schematic',
-                matchCount: 10,
+                matchCount: 15,
+                folderId: selectedFolderId || null,
+                documentId: selectedDocId || null,
             });
 
             // Aggregate components & connections from matches
@@ -205,16 +209,47 @@ export default function DiagramPage() {
                     </div>
                 </div>
 
+                {/* Filter Controls */}
+                <div className="flex flex-wrap gap-4 mb-4 items-end">
+                    <div className="flex-1 min-w-[200px]">
+                        <label className="block text-xs font-bold mb-1 ml-1" style={{ color: 'var(--text-secondary)' }}>Target Folder</label>
+                        <select
+                            className="input-field w-full text-sm"
+                            value={selectedFolderId}
+                            onChange={(e) => setSelectedFolderId(e.target.value)}
+                        >
+                            <option value="">All Folders</option>
+                            {folders.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
+                        </select>
+                    </div>
+                    <div className="flex-1 min-w-[200px]">
+                        <label className="block text-xs font-bold mb-1 ml-1" style={{ color: 'var(--text-secondary)' }}>Target Document</label>
+                        <select
+                            className="input-field w-full text-sm"
+                            value={selectedDocId}
+                            onChange={(e) => setSelectedDocId(e.target.value)}
+                        >
+                            <option value="">All Documents</option>
+                            {documents.filter(d => !selectedFolderId || d.folder_id === selectedFolderId).map(d => (
+                                <option key={d.id} value={d.id}>{d.name}</option>
+                            ))}
+                        </select>
+                    </div>
+                </div>
+
                 {/* Search bar */}
                 <div className="glass-card p-4 mb-4">
                     <div className="flex gap-3">
-                        <input
-                            className="input-field flex-1"
-                            placeholder="Search for a circuit, panel, or system... e.g., 'Traction power panel SLD'"
-                            value={searchQuery}
-                            onChange={(e) => setSearchQuery(e.target.value)}
-                            onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-                        />
+                        <div className="relative flex-1">
+                            <input
+                                className="input-field w-full pl-10"
+                                placeholder="Search for a circuit, panel, or system... e.g., 'Traction power panel SLD'"
+                                value={searchQuery}
+                                onChange={(e) => setSearchQuery(e.target.value)}
+                                onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+                            />
+                            <HiOutlineSearch className="absolute left-3 top-1/2 -translate-y-1/2 opacity-30" size={18} />
+                        </div>
                         <button
                             onClick={handleSearch}
                             disabled={loading || !searchQuery.trim()}

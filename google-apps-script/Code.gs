@@ -19,8 +19,16 @@
 // That's it! No Supabase, no external database needed.
 // ============================================================
 
-const GEMINI_API_KEY = "PASTE_YOUR_GEMINI_API_KEY_HERE";
-const DRIVE_FOLDER_ID = "PASTE_YOUR_DRIVE_FOLDER_ID_HERE";
+// ============================================================
+// SECURITY: Using Script Properties instead of hardcoding
+// Set these in Apps Script Settings → Script Properties:
+// - GEMINI_API_KEY
+// - DRIVE_FOLDER_ID
+// ============================================================
+
+const SCRIPT_PROPS = PropertiesService.getScriptProperties();
+const GEMINI_API_KEY = SCRIPT_PROPS.getProperty("GEMINI_API_KEY") || "SET_IN_PROPERTIES";
+const DRIVE_FOLDER_ID = SCRIPT_PROPS.getProperty("DRIVE_FOLDER_ID") || "SET_IN_PROPERTIES";
 
 // Optional: set manually if you already have a database spreadsheet
 const SPREADSHEET_ID_OVERRIDE = "";
@@ -28,9 +36,8 @@ const SPREADSHEET_ID_OVERRIDE = "";
 // Gemini models to try in order (newest → oldest)
 const GEMINI_MODELS = [
   "gemini-2.0-flash",
-  "gemini-2.5-flash-lite",
-  "gemini-2.5-flash",
-  "gemini-1.5-flash"
+  "gemini-1.5-flash",
+  "gemini-1.5-pro"
 ];
 
 // Batch processing config
@@ -166,7 +173,7 @@ function routeAction(data) {
     case "list_folders":        return listFoldersAction();
     case "query":               return handleQuery(data);
     case "sync_drive":          return syncDriveFiles();
-    case "health":              return jsonResp({ status: "ok", version: "5.0", db: "sheets", runtime: "V8", batchProcessing: true });
+    case "health":              return jsonResp({ status: "ok", version: "6.0 (Multi-Agent RAG)", db: "sheets", runtime: "V8", batchProcessing: true });
     default:                    return jsonResp({ error: "Unknown action: " + data.action });
   }
 }
@@ -186,38 +193,36 @@ function callGemini(contents, config) {
   const maxOutputTokens = config.maxOutputTokens || 4096;
 
   for (const model of GEMINI_MODELS) {
-    try {
-      const url = "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent?key=" + GEMINI_API_KEY;
-      const res = UrlFetchApp.fetch(url, {
-        method: "post",
-        contentType: "application/json",
-        payload: JSON.stringify({
-          contents: contents,
-          generationConfig: { temperature, maxOutputTokens }
-        }),
-        muteHttpExceptions: true
-      });
+    // Try both v1 and v1beta endpoints
+    const versions = ["v1", "v1beta"];
+    for (const v of versions) {
+      try {
+        const url = "https://generativelanguage.googleapis.com/" + v + "/models/" + model + ":generateContent?key=" + GEMINI_API_KEY;
+        const res = UrlFetchApp.fetch(url, {
+          method: "post",
+          contentType: "application/json",
+          payload: JSON.stringify({
+            contents: contents,
+            generationConfig: { temperature, maxOutputTokens }
+          }),
+          muteHttpExceptions: true
+        });
 
-      const statusCode = res.getResponseCode();
-      if (statusCode === 200) {
-        const result = JSON.parse(res.getContentText());
-        if (result.candidates && result.candidates[0] && result.candidates[0].content) {
-          Logger.log("Gemini OK via model: " + model);
-          return result.candidates[0].content.parts[0].text;
+        const statusCode = res.getResponseCode();
+        if (statusCode === 200) {
+          const result = JSON.parse(res.getContentText());
+          if (result.candidates && result.candidates[0] && result.candidates[0].content) {
+            Logger.log("Gemini OK via model: " + model + " (" + v + ")");
+            return result.candidates[0].content.parts[0].text;
+          }
         }
-      } else if (statusCode === 404) {
-        Logger.log("Model " + model + " not found (404), trying next...");
-        continue;
-      } else {
-        Logger.log("Model " + model + " error (" + statusCode + "): " + res.getContentText().substring(0, 200));
-        continue;
+        Logger.log("Model " + model + " (" + v + ") failed: " + statusCode);
+      } catch (e) {
+        Logger.log("Model " + model + " (" + v + ") fetch error: " + e.message);
       }
-    } catch (e) {
-      Logger.log("Model " + model + " fetch error: " + e.message);
     }
   }
-
-  return null; // All models failed
+  return null;
 }
 
 // ============================================================
@@ -1281,13 +1286,35 @@ function handleQuery(data) {
   const hasEmbeddings = queryEmb && queryEmb.length > 0;
   Logger.log("Search mode: " + (hasEmbeddings ? "EMBEDDING+KEYWORD" : "KEYWORD"));
 
+  // 2.5 Resolve target documents if folderId is provided
+  let targetDocIds = null;
+  if (data.documentId) {
+    targetDocIds = [String(data.documentId)];
+  } else if (data.folderId) {
+    targetDocIds = [];
+    const docData = getSheet("Documents").getDataRange().getValues();
+    for (let j = 1; j < docData.length; j++) {
+      if (String(docData[j][2]) === String(data.folderId)) {
+        targetDocIds.push(String(docData[j][0]));
+      }
+    }
+    Logger.log("Filtering by folder " + data.folderId + ", docs found: " + targetDocIds.length);
+  }
+
+  // 1.5 Multi-Agent Router: Detect intent & expand keywords
+  const routing = agentRouter(data.query);
+  Logger.log("Agent Intent: " + routing.intent + " | Keywords: " + (routing.expandedKeywords ? routing.expandedKeywords.join(", ") : "none"));
+  
   // 3. Score all chunks with hybrid scoring
   const queryLower = data.query.toLowerCase();
-  const queryWords = queryLower.split(/\s+/).filter(w => w.length > 2);
+  const queryWords = [...new Set([...queryLower.split(/\s+/), ...(routing.expandedKeywords || [])])].filter(w => w.length > 2);
   const allScored = [];
 
   for (let i = 1; i < rawData.length; i++) {
     // Apply filters
+    const docId = String(rawData[i][1]);
+    if (targetDocIds && targetDocIds.indexOf(docId) === -1) continue;
+
     if (data.filterPanel && String(rawData[i][4]).toUpperCase().indexOf(data.filterPanel.toUpperCase()) === -1) continue;
     if (data.filterVoltage && String(rawData[i][5]).toUpperCase().indexOf(data.filterVoltage.toUpperCase()) === -1) continue;
 
@@ -1312,7 +1339,7 @@ function handleQuery(data) {
     if (hybridScore > 0.01) {
       allScored.push({
         id: rawData[i][0],
-        document_id: rawData[i][1],
+        document_id: docId,
         content: content,
         page_number: rawData[i][3],
         panel: rawData[i][4],
@@ -1350,6 +1377,11 @@ function handleQuery(data) {
       (m.panel ? ", Panel " + m.panel : "") + "]\n" + m.content
     ).join("\n\n---\n\n");
     answer = generateAnswer(data.query, context, data.outputType || "text");
+    
+    // Multi-Agent Verification: Check for hallucinations/completeness
+    if (typeof answer === "string" && data.outputType !== "schematic") {
+      answer = verificationAgent(data.query, context, answer);
+    }
   }
 
   // 7. Log query
@@ -1505,13 +1537,17 @@ function generateAnswer(query, context, outputType) {
 
   if (outputType === "json") {
     prompt = "You are an electrical engineering expert. Based ONLY on the context, answer as JSON: " +
-      '{summary, components[], connections[{from,to}], voltage_levels[], panel_info, notes}. ';
+      '{"summary":"","components":[],"connections":[{"from":"","to":"","cable":"","description":""}],"voltage_levels":[],"panel_info":"","notes":""}. ' +
+      "Be extremely precise with cable details and connection paths. ";
   } else if (outputType === "schematic") {
-    prompt = "You are an electrical schematic expert. Based ONLY on the context, return JSON: " +
-      '{"components":[{"id":"...","type":"...","label":"..."}],"connections":[{"from":"...","to":"...","label":"..."}]}. ';
+    prompt = "You are an electrical schematic expert. Convert the context into a graph structure for React Flow. " + 
+      "Focus on cable connections, breakers, and panels. Return ONLY JSON: " +
+      '{"components":[{"id":"unique_id","type":"ComponentType (e.g. MCCB, TRANSFORMER, BUSBAR)","label":"Full Name"}],"connections":[{"from":"ComponentName","to":"ComponentName","label":"Cable info"}]}. ' +
+      "Important: Only include components you are 100% sure about based on the context. ";
   } else {
-    prompt = "You are an electrical engineering expert reviewing metro circuit drawings. " +
-      "Answer based ONLY on the context. Cite page/panel references. Never fabricate data. ";
+    prompt = "You are a professional Metro Engineering Analyst. Answer based ONLY on the provided context. " +
+      "Cite specific page numbers and panel IDs for every technical fact. " +
+      "If the data is missing, state it clearly. Focus on cable ratings, circuit paths, and equipment ratings. ";
   }
 
   prompt += "\n\nCONTEXT:\n" + context.substring(0, 10000) + "\n\nQUERY:\n" + query;
@@ -1525,6 +1561,43 @@ function generateAnswer(query, context, outputType) {
     return "Unable to generate answer. All Gemini models returned errors. Please check your API key.";
   }
   return result;
+}
+
+// ── Multi-Agent Router ──
+function agentRouter(query) {
+  const prompt = "Analyze this electrical engineering query. Identify if the user wants: " +
+    "1. TEXT_ANSWER (general info), 2. CABLE_DETAILS (specific cable/wiring info), 3. SCHEMATIC (diagram generation). " +
+    "Return JSON: {\"intent\":\"...\", \"expandedKeywords\":[\"synonyms\",\"units\"]}\n\n" +
+    "Query: " + query;
+    
+  try {
+    const res = callGemini([{ parts: [{ text: prompt }] }], { temperature: 0, maxOutputTokens: 256 });
+    if (res) {
+      const cleaned = res.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+      const parsed = JSON.parse(cleaned);
+      // Hardcoded fallback for cable keywords to ensure quality
+      if (parsed.intent === "CABLE_DETAILS") {
+        parsed.expandedKeywords = [...new Set([...parsed.expandedKeywords, "core", "sqmm", "wire", "cable", "armor", "screen", "rating", "current"])];
+      }
+      return parsed;
+    }
+  } catch (e) {}
+  return { intent: "TEXT_ANSWER", expandedKeywords: [] };
+}
+
+// ── Multi-Agent Verification ──
+function verificationAgent(query, context, currentAnswer) {
+  const prompt = "You are a verification officer. Compare the ANSWER against the CONTEXT. " +
+    "If the answer misses cable details, voltage ratings, or panel names mentioned in context, " +
+    "ADD them. Ensure every fact has a citation [Source X]. If the answer is perfect, return it as is.\n\n" +
+    "QUERY: " + query + "\n\nCONTEXT:\n" + context.substring(0, 5000) + "\n\nANSWER:\n" + currentAnswer;
+    
+  try {
+    const res = callGemini([{ parts: [{ text: prompt }] }], { temperature: 0.1 });
+    return res || currentAnswer;
+  } catch (e) {
+    return currentAnswer;
+  }
 }
 
 // ============================================================
