@@ -134,6 +134,47 @@ export async function processDocument(documentId) {
     return callBackend({ action: 'process_document', documentId });
 }
 
+/**
+ * Batch-process a document with auto-continue and progress callback.
+ * Calls process_batch in a loop until processing is complete.
+ * @param {string} documentId - The document ID to process
+ * @param {function} onProgress - Callback: ({ status, pagesProcessed, totalPages, totalChunks, message }) => void
+ * @returns {Promise<object>} Final result with status 'indexed'
+ */
+export async function processDocumentBatch(documentId, onProgress) {
+    // Step 1: Start processing (calls process_document which kicks off batch)
+    let result = await callBackend({ action: 'process_document', documentId });
+
+    if (onProgress) {
+        onProgress(result);
+    }
+
+    // Step 2: Continue batching until complete
+    let maxIterations = 200; // Safety limit (~2000 pages max)
+    while (result.status === 'in_progress' && maxIterations > 0) {
+        // Small delay between batch calls
+        await new Promise(resolve => setTimeout(resolve, 1500));
+
+        result = await callBackend({ action: 'process_batch', documentId });
+
+        if (onProgress) {
+            onProgress(result);
+        }
+
+        maxIterations--;
+    }
+
+    return result;
+}
+
+export async function getProcessStatus(documentId) {
+    return callBackend({ action: 'get_process_status', documentId });
+}
+
+export async function embedDocumentChunks(documentId) {
+    return callBackend({ action: 'embed_chunks', documentId });
+}
+
 // ============================================================
 // DRIVE SYNC
 // ============================================================

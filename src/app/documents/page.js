@@ -5,7 +5,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useDropzone } from 'react-dropzone';
 import AppShell from '@/components/layout/AppShell';
 import useStore from '@/store/useStore';
-import { listFolders, createFolder, deleteFolder, listDocuments, uploadDocument, deleteDocument, processDocument, syncDrive } from '@/lib/api';
+import { listFolders, createFolder, deleteFolder, listDocuments, uploadDocument, deleteDocument, processDocumentBatch, syncDrive } from '@/lib/api';
 import {
     HiOutlineFolder, HiOutlineFolderAdd, HiOutlineDocumentText,
     HiOutlineTrash, HiOutlineUpload, HiOutlineX, HiOutlineEye,
@@ -24,6 +24,7 @@ export default function DocumentsPage() {
     const [syncing, setSyncing] = useState(false);
     const [error, setError] = useState('');
     const [processingId, setProcessingId] = useState(null);
+    const [processProgress, setProcessProgress] = useState(null); // { pagesProcessed, totalPages, totalChunks, message }
 
     useEffect(() => {
         loadData();
@@ -349,6 +350,28 @@ export default function DocumentsPage() {
                                                     <span className={`status-badge ${doc.status || 'uploaded'}`}>
                                                         {doc.status || 'uploaded'}
                                                     </span>
+                                                    {processingId === doc.id && processProgress && (
+                                                        <div className="mt-2 text-xs" style={{ color: 'var(--accent-emerald)' }}>
+                                                            <div className="mb-1">
+                                                                {processProgress.message || (
+                                                                    processProgress.totalPages
+                                                                        ? `Page ${processProgress.pagesProcessed || 0}/${processProgress.totalPages} (${processProgress.totalChunks || 0} chunks)`
+                                                                        : 'Starting...'
+                                                                )}
+                                                            </div>
+                                                            {processProgress.totalPages > 0 && (
+                                                                <div style={{ width: '100px', height: '4px', borderRadius: '2px', background: 'var(--bg-tertiary)' }}>
+                                                                    <div style={{
+                                                                        width: `${Math.round((processProgress.pagesProcessed || 0) / processProgress.totalPages * 100)}%`,
+                                                                        height: '4px',
+                                                                        borderRadius: '2px',
+                                                                        background: 'var(--accent-emerald)',
+                                                                        transition: 'width 0.5s ease'
+                                                                    }} />
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    )}
                                                 </td>
                                                 <td className="p-4 text-sm hidden md:table-cell" style={{ color: 'var(--text-secondary)' }}>
                                                     {doc.page_count || 0}
@@ -358,23 +381,27 @@ export default function DocumentsPage() {
                                                 </td>
                                                 <td className="p-4 text-right">
                                                     <div className="flex items-center justify-end gap-2">
-                                                        {(doc.status === 'uploaded' || doc.status === 'error') && (
+                                                        {(doc.status === 'uploaded' || doc.status === 'error' || doc.status === 'extracting' || doc.status === 'processing') && (
                                                             <button
                                                                 onClick={async (e) => {
                                                                     e.stopPropagation();
                                                                     setProcessingId(doc.id);
+                                                                    setProcessProgress({ message: 'Extracting text...' });
                                                                     try {
-                                                                        const res = await processDocument(doc.id);
-                                                                        addNotification(`Processed: ${doc.name} — ${res.chunksProcessed || 0} chunks`, 'success');
+                                                                        const res = await processDocumentBatch(doc.id, (progress) => {
+                                                                            setProcessProgress(progress);
+                                                                        });
+                                                                        addNotification(`Processed: ${doc.name} — ${res.totalChunks || 0} chunks from ${res.totalPages || 0} pages`, 'success');
                                                                         await loadData();
                                                                     } catch (err) {
                                                                         addNotification('Process failed: ' + err.message, 'error');
                                                                     }
                                                                     setProcessingId(null);
+                                                                    setProcessProgress(null);
                                                                 }}
                                                                 className="p-2 rounded-lg hover:bg-emerald-500/10 transition-colors"
                                                                 style={{ color: 'var(--accent-emerald)' }}
-                                                                title="Process: Extract text & create chunks"
+                                                                title="Process: Extract text & create chunks (batch mode)"
                                                                 disabled={processingId === doc.id}
                                                             >
                                                                 {processingId === doc.id

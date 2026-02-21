@@ -33,6 +33,12 @@ const GEMINI_MODELS = [
   "gemini-1.5-flash"
 ];
 
+// Batch processing config
+const BATCH_PAGE_SIZE = 10;          // Pages per batch call
+const TIME_LIMIT_MS = 5 * 60 * 1000; // 5 minutes (leaving 1 min buffer)
+const CHUNK_TARGET_SIZE = 1500;      // Target chunk size in chars
+const CHUNK_OVERLAP = 200;           // Overlap between chunks
+
 // ============================================================
 // DATABASE: Get or create the Google Sheet database
 // ============================================================
@@ -147,18 +153,21 @@ function doGet(e) {
 
 function routeAction(data) {
   switch (data.action) {
-    case "init_db":            return initDB();
-    case "upload":             return uploadFile(data);
-    case "list_documents":     return listDocuments(data);
-    case "delete_document":    return deleteDocumentAction(data);
-    case "process_document":   return processDocumentAction(data);
-    case "create_folder":      return createFolderAction(data);
-    case "delete_folder":      return deleteFolderAction(data);
-    case "list_folders":       return listFoldersAction();
-    case "query":              return handleQuery(data);
-    case "sync_drive":         return syncDriveFiles();
-    case "health":             return jsonResp({ status: "ok", version: "4.1", db: "sheets", runtime: "V8" });
-    default:                   return jsonResp({ error: "Unknown action: " + data.action });
+    case "init_db":             return initDB();
+    case "upload":              return uploadFile(data);
+    case "list_documents":      return listDocuments(data);
+    case "delete_document":     return deleteDocumentAction(data);
+    case "process_document":    return processDocumentAction(data);
+    case "process_batch":       return processBatchAction(data);
+    case "get_process_status":  return getProcessStatus(data);
+    case "embed_chunks":        return embedChunksAction(data);
+    case "create_folder":       return createFolderAction(data);
+    case "delete_folder":       return deleteFolderAction(data);
+    case "list_folders":        return listFoldersAction();
+    case "query":               return handleQuery(data);
+    case "sync_drive":          return syncDriveFiles();
+    case "health":              return jsonResp({ status: "ok", version: "5.0", db: "sheets", runtime: "V8", batchProcessing: true });
+    default:                    return jsonResp({ error: "Unknown action: " + data.action });
   }
 }
 
@@ -366,7 +375,7 @@ function uploadFile(data) {
 }
 
 // ============================================================
-// PROCESS DOCUMENT (for synced files that need chunking)
+// PROCESS DOCUMENT (extracts text, splits into pages, starts batch)
 // ============================================================
 
 function processDocumentAction(data) {
@@ -396,7 +405,7 @@ function processDocumentAction(data) {
     if (!doc.drive_file_id) return jsonResp({ error: "No Drive file linked to this document" });
 
     // Update status to processing
-    docSheet.getRange(docRow, 6).setValue("processing");
+    docSheet.getRange(docRow, 6).setValue("extracting");
     SpreadsheetApp.flush();
 
     // Get the file from Drive
@@ -405,7 +414,7 @@ function processDocumentAction(data) {
       file = DriveApp.getFileById(doc.drive_file_id);
     } catch (e) {
       updateDocStatus(doc.id, "error", 0);
-      return jsonResp({ error: "Drive file not found: " + doc.drive_file_id + ". File may have been deleted." });
+      return jsonResp({ error: "Drive file not found: " + doc.drive_file_id });
     }
 
     // Extract text
@@ -414,29 +423,59 @@ function processDocumentAction(data) {
     if (!text || text.trim().length < 10) {
       updateDocStatus(doc.id, "error", 0);
       return jsonResp({
-        error: "Could not extract text from '" + doc.name + "' (type: " + doc.file_type + "). " +
-               "Check Apps Script Executions log for details. The file may be an image-only PDF or unsupported format."
+        error: "Could not extract text from '" + doc.name + "'. The file may be image-only or unsupported."
       });
     }
 
     Logger.log("Extracted " + text.length + " characters from " + doc.name);
 
-    // Delete old chunks if any
+    // Split text into pages
+    const pages = splitIntoPages(text);
+    Logger.log("Split into " + pages.length + " pages");
+
+    // Store pages in Script Properties for batch processing
+    const props = PropertiesService.getScriptProperties();
+    const batchState = {
+      docId: doc.id,
+      docName: doc.name,
+      totalPages: pages.length,
+      processedPages: 0,
+      totalChunks: 0,
+      startTime: new Date().toISOString()
+    };
+
+    // Store pages in chunks (Script Properties has a 9KB per value limit)
+    const pageGroups = [];
+    let currentGroup = [];
+    let currentSize = 0;
+
+    for (let i = 0; i < pages.length; i++) {
+      const pageStr = pages[i];
+      if (currentSize + pageStr.length > 8000 && currentGroup.length > 0) {
+        pageGroups.push(currentGroup);
+        currentGroup = [];
+        currentSize = 0;
+      }
+      currentGroup.push(pageStr);
+      currentSize += pageStr.length;
+    }
+    if (currentGroup.length > 0) pageGroups.push(currentGroup);
+
+    // Store page groups
+    for (let g = 0; g < pageGroups.length; g++) {
+      props.setProperty("BATCH_PAGES_" + doc.id + "_" + g, JSON.stringify(pageGroups[g]));
+    }
+    batchState.pageGroupCount = pageGroups.length;
+    props.setProperty("BATCH_STATE_" + doc.id, JSON.stringify(batchState));
+
+    // Delete old chunks
     deleteChunksByDocId(doc.id);
 
-    // Process into chunks
-    const result = processTextIntoChunks(doc.id, text);
-
     // Update status
-    updateDocStatus(doc.id, "indexed", result.processed);
+    updateDocStatus(doc.id, "processing", pages.length);
 
-    return jsonResp({
-      status: "indexed",
-      documentId: doc.id,
-      chunksProcessed: result.processed,
-      totalChunks: result.total,
-      textLength: text.length
-    });
+    // Start first batch immediately
+    return processBatchAction({ documentId: doc.id });
 
   } catch (err) {
     Logger.log("Process error: " + err.message + "\n" + err.stack);
@@ -445,50 +484,325 @@ function processDocumentAction(data) {
 }
 
 // ============================================================
-// SHARED: Process text into chunks with embeddings
+// BATCH PROCESSING (processes N pages per call with time guard)
 // ============================================================
 
-function processTextIntoChunks(docId, text) {
-  const chunks = engineeringChunk(text);
-  Logger.log("Created " + chunks.length + " chunks for doc " + docId);
+function processBatchAction(data) {
+  if (!data.documentId) return jsonResp({ error: "Document ID required" });
 
+  const startTime = Date.now();
+  const props = PropertiesService.getScriptProperties();
+  const stateKey = "BATCH_STATE_" + data.documentId;
+
+  // Load batch state
+  const stateStr = props.getProperty(stateKey);
+  if (!stateStr) {
+    return jsonResp({ error: "No batch processing state found. Call process_document first." });
+  }
+
+  const state = JSON.parse(stateStr);
+  Logger.log("Batch processing: doc=" + state.docId + ", processed=" + state.processedPages + "/" + state.totalPages);
+
+  // Load remaining pages
+  const allPages = [];
+  for (let g = 0; g < state.pageGroupCount; g++) {
+    const groupStr = props.getProperty("BATCH_PAGES_" + state.docId + "_" + g);
+    if (groupStr) {
+      const group = JSON.parse(groupStr);
+      allPages.push(...group);
+    }
+  }
+
+  if (allPages.length === 0) {
+    // All done
+    cleanupBatchState(state.docId, state.pageGroupCount);
+    updateDocStatus(state.docId, "indexed", state.totalChunks);
+    return jsonResp({
+      status: "indexed",
+      documentId: state.docId,
+      totalPages: state.totalPages,
+      totalChunks: state.totalChunks,
+      pagesProcessed: state.totalPages
+    });
+  }
+
+  // Process pages until time limit
   const chunkSheet = getSheet("Chunks");
-  let processedCount = 0;
+  let pagesProcessedThisBatch = 0;
+  let chunksCreated = 0;
 
-  for (let j = 0; j < chunks.length; j++) {
-    try {
-      const extraction = extractEngineeringData(chunks[j]);
+  for (let p = state.processedPages; p < allPages.length; p++) {
+    // TIME GUARD: check if we're approaching the limit
+    const elapsed = Date.now() - startTime;
+    if (elapsed > TIME_LIMIT_MS) {
+      Logger.log("Time limit reached at page " + (p + 1) + ". Saving progress.");
+      break;
+    }
 
-      let embedding;
+    const pageText = allPages[p];
+    if (!pageText || pageText.trim().length < 5) {
+      pagesProcessedThisBatch++;
+      continue;
+    }
+
+    // Chunk this page
+    const pageChunks = engineeringChunkPage(pageText, p + 1);
+
+    for (const chunk of pageChunks) {
+      // Extract engineering data (fast — no embedding yet)
+      let extraction;
       try {
-        embedding = getGeminiEmbedding(chunks[j]);
-      } catch (embErr) {
-        Logger.log("Embedding failed for chunk " + j + ": " + embErr.message);
-        embedding = []; // Store empty embedding — can re-process later
+        extraction = extractEngineeringData(chunk.text);
+      } catch (e) {
+        extraction = fallbackExtract(chunk.text);
       }
 
       chunkSheet.appendRow([
         Utilities.getUuid(),
-        docId,
-        chunks[j],
-        j + 1,
+        state.docId,
+        chunk.text,
+        chunk.pageNumber,
         extraction.panel || "",
         extraction.voltage || "",
         JSON.stringify(extraction.components || []),
         JSON.stringify(extraction.connections || []),
-        JSON.stringify(embedding),
+        "[]",  // Empty embedding — will be filled by embed_chunks
         new Date().toISOString()
       ]);
-      processedCount++;
-    } catch (chunkErr) {
-      Logger.log("Chunk " + j + " error: " + chunkErr.message);
+      chunksCreated++;
     }
 
-    // Rate limiting to avoid Gemini quota issues
-    if (j > 0 && j % 2 === 0) Utilities.sleep(1000);
+    pagesProcessedThisBatch++;
+
+    // Rate limiting
+    if (pagesProcessedThisBatch > 0 && pagesProcessedThisBatch % 3 === 0) {
+      Utilities.sleep(500);
+    }
   }
 
-  return { processed: processedCount, total: chunks.length };
+  // Update batch state
+  state.processedPages += pagesProcessedThisBatch;
+  state.totalChunks += chunksCreated;
+
+  const isComplete = state.processedPages >= allPages.length;
+
+  if (isComplete) {
+    // Done! Clean up
+    cleanupBatchState(state.docId, state.pageGroupCount);
+    updateDocStatus(state.docId, "indexed", state.totalChunks);
+
+    Logger.log("Batch complete: " + state.totalChunks + " chunks from " + state.totalPages + " pages");
+
+    return jsonResp({
+      status: "indexed",
+      documentId: state.docId,
+      totalPages: state.totalPages,
+      pagesProcessed: state.processedPages,
+      totalChunks: state.totalChunks
+    });
+  } else {
+    // Save progress and return for next batch
+    props.setProperty(stateKey, JSON.stringify(state));
+    SpreadsheetApp.flush();
+
+    Logger.log("Batch saved: " + state.processedPages + "/" + state.totalPages + " pages, " + state.totalChunks + " chunks");
+
+    return jsonResp({
+      status: "in_progress",
+      documentId: state.docId,
+      totalPages: state.totalPages,
+      pagesProcessed: state.processedPages,
+      totalChunks: state.totalChunks,
+      message: "Processing page " + state.processedPages + " of " + state.totalPages + "..."
+    });
+  }
+}
+
+// ============================================================
+// GET PROCESS STATUS
+// ============================================================
+
+function getProcessStatus(data) {
+  if (!data.documentId) return jsonResp({ error: "Document ID required" });
+
+  const props = PropertiesService.getScriptProperties();
+  const stateStr = props.getProperty("BATCH_STATE_" + data.documentId);
+
+  if (!stateStr) {
+    // Check if document is already indexed
+    const docSheet = getSheet("Documents");
+    const docData = docSheet.getDataRange().getValues();
+    for (let i = 1; i < docData.length; i++) {
+      if (String(docData[i][0]) === String(data.documentId)) {
+        return jsonResp({
+          status: String(docData[i][5]),
+          documentId: data.documentId,
+          totalChunks: Number(docData[i][6]) || 0
+        });
+      }
+    }
+    return jsonResp({ error: "Document not found" });
+  }
+
+  const state = JSON.parse(stateStr);
+  return jsonResp({
+    status: state.processedPages >= state.totalPages ? "indexed" : "in_progress",
+    documentId: state.docId,
+    totalPages: state.totalPages,
+    pagesProcessed: state.processedPages,
+    totalChunks: state.totalChunks,
+    startTime: state.startTime
+  });
+}
+
+// ============================================================
+// EMBED CHUNKS (separate pass — adds embeddings to existing chunks)
+// ============================================================
+
+function embedChunksAction(data) {
+  if (!data.documentId) return jsonResp({ error: "Document ID required" });
+
+  const startTime = Date.now();
+  const chunkSheet = getSheet("Chunks");
+  const chunkData = chunkSheet.getDataRange().getValues();
+  let embedded = 0;
+  let skipped = 0;
+
+  for (let i = 1; i < chunkData.length; i++) {
+    if (String(chunkData[i][1]) !== String(data.documentId)) continue;
+
+    // Check if already has embedding
+    const existingEmb = safeParseJSON(chunkData[i][8], []);
+    if (existingEmb && existingEmb.length > 0) {
+      skipped++;
+      continue;
+    }
+
+    // Time guard
+    if (Date.now() - startTime > TIME_LIMIT_MS) {
+      return jsonResp({
+        status: "in_progress",
+        embedded: embedded,
+        remaining: "time_limit_reached"
+      });
+    }
+
+    // Generate embedding
+    try {
+      const embedding = getGeminiEmbedding(chunkData[i][2]);
+      if (embedding && embedding.length > 0) {
+        chunkSheet.getRange(i + 1, 9).setValue(JSON.stringify(embedding));
+        embedded++;
+      }
+    } catch (e) {
+      Logger.log("Embed error chunk " + i + ": " + e.message);
+    }
+
+    // Rate limiting
+    if (embedded % 3 === 0) Utilities.sleep(500);
+  }
+
+  return jsonResp({
+    status: "complete",
+    documentId: data.documentId,
+    embedded: embedded,
+    skipped: skipped
+  });
+}
+
+// ============================================================
+// CLEANUP BATCH STATE
+// ============================================================
+
+function cleanupBatchState(docId, groupCount) {
+  const props = PropertiesService.getScriptProperties();
+  props.deleteProperty("BATCH_STATE_" + docId);
+  for (let g = 0; g < (groupCount || 50); g++) {
+    props.deleteProperty("BATCH_PAGES_" + docId + "_" + g);
+  }
+}
+
+// ============================================================
+// SPLIT TEXT INTO PAGES
+// ============================================================
+
+function splitIntoPages(text) {
+  // Strategy 1: Look for page markers (common in converted PDFs)
+  let pages = text.split(/(?:\n\s*){3,}|\f|(?:---\s*\n)|(?:Page\s+\d+\s*(?:of\s+\d+)?\s*\n)/i);
+
+  // Strategy 2: If very few splits, try numbered page patterns
+  if (pages.length <= 3 && text.length > 5000) {
+    pages = text.split(/(?=(?:^|\n)\s*(?:\d+\.\s|DRAWING\s|SHEET\s|DWG\s|SLD\s|CIRCUIT\s|PAGE\s)\s*)/gi);
+  }
+
+  // Strategy 3: If still one big block, chunk by character count (~2000 chars per "page")
+  if (pages.length <= 2 && text.length > 3000) {
+    pages = [];
+    const pageSize = 2000;
+    for (let i = 0; i < text.length; i += pageSize) {
+      // Find a natural break point near the target
+      let end = Math.min(i + pageSize, text.length);
+      if (end < text.length) {
+        const nlPos = text.indexOf("\n", end - 200);
+        if (nlPos > 0 && nlPos < end + 200) end = nlPos;
+      }
+      pages.push(text.substring(i, end));
+      if (end !== i + pageSize) i = end - i - pageSize + end; // adjust
+    }
+
+    // Simpler fallback
+    if (pages.length <= 1) {
+      pages = [];
+      for (let i = 0; i < text.length; i += 2000) {
+        pages.push(text.substring(i, Math.min(i + 2000, text.length)));
+      }
+    }
+  }
+
+  // Filter empty pages
+  return pages.filter(p => p && p.trim().length > 5);
+}
+
+// ============================================================
+// SHARED: Process text into chunks (legacy — for small docs via upload)
+// ============================================================
+
+function processTextIntoChunks(docId, text) {
+  const pages = splitIntoPages(text);
+  const chunkSheet = getSheet("Chunks");
+  let processedCount = 0;
+
+  for (let p = 0; p < pages.length; p++) {
+    const pageChunks = engineeringChunkPage(pages[p], p + 1);
+
+    for (const chunk of pageChunks) {
+      try {
+        const extraction = extractEngineeringData(chunk.text);
+
+        // Skip embedding for speed — keyword search works immediately
+        chunkSheet.appendRow([
+          Utilities.getUuid(),
+          docId,
+          chunk.text,
+          chunk.pageNumber,
+          extraction.panel || "",
+          extraction.voltage || "",
+          JSON.stringify(extraction.components || []),
+          JSON.stringify(extraction.connections || []),
+          "[]",
+          new Date().toISOString()
+        ]);
+        processedCount++;
+      } catch (chunkErr) {
+        Logger.log("Chunk error: " + chunkErr.message);
+      }
+
+      // Rate limiting
+      if (processedCount > 0 && processedCount % 3 === 0) Utilities.sleep(500);
+    }
+  }
+
+  return { processed: processedCount, total: processedCount };
 }
 
 // ============================================================
@@ -776,24 +1090,26 @@ function geminiExtractText(base64Data, mimeType) {
 }
 
 // ============================================================
-// SMART ENGINEERING CHUNKING
+// SMART ENGINEERING CHUNKING (page-aware with overlap)
 // ============================================================
 
-function engineeringChunk(text) {
-  // Try engineering-specific splits first
-  let sections = text.split(/(?=PANEL|FEEDER|TRANSFORMER|SECTION|DRAWING|SCHEDULE|SLD|CIRCUIT|BUSBAR|SWITCHGEAR|SUBSTATION)/gi);
+function engineeringChunkPage(pageText, pageNumber) {
+  if (!pageText || pageText.trim().length < 10) return [];
 
-  // If no engineering keywords found, split by double newlines
+  // Split by engineering keywords within this page
+  let sections = pageText.split(/(?=PANEL|FEEDER|TRANSFORMER|SECTION|DRAWING|SCHEDULE|SLD|CIRCUIT|BUSBAR|SWITCHGEAR|SUBSTATION|BREAKER|RELAY|MOTOR|CT\s|PT\s|VCB|ACB|MCCB)/gi);
+
+  // Fallback: double newlines
   if (sections.length <= 1) {
-    sections = text.split(/\n\s*\n/);
+    sections = pageText.split(/\n\s*\n/);
   }
 
-  // If still just one big block, split by single newlines
+  // Fallback: single newlines
   if (sections.length <= 1) {
-    sections = text.split(/\n/);
+    sections = pageText.split(/\n/);
   }
 
-  // Group into ~1200 char chunks
+  // Group into ~CHUNK_TARGET_SIZE char chunks with overlap
   const chunks = [];
   let buffer = "";
 
@@ -801,34 +1117,59 @@ function engineeringChunk(text) {
     const trimmed = section.trim();
     if (!trimmed) continue;
 
-    if (buffer.length + trimmed.length < 1200) {
+    if (buffer.length + trimmed.length < CHUNK_TARGET_SIZE) {
       buffer += "\n\n" + trimmed;
     } else {
-      if (buffer.trim()) chunks.push(buffer.trim());
-      buffer = trimmed;
+      if (buffer.trim()) {
+        chunks.push({
+          text: "[Page " + pageNumber + "]\n" + buffer.trim(),
+          pageNumber: pageNumber
+        });
+      }
+      // Overlap: keep last CHUNK_OVERLAP chars from previous chunk
+      const overlap = buffer.length > CHUNK_OVERLAP
+        ? buffer.substring(buffer.length - CHUNK_OVERLAP)
+        : "";
+      buffer = overlap + "\n\n" + trimmed;
     }
   }
-  if (buffer.trim()) chunks.push(buffer.trim());
+  if (buffer.trim()) {
+    chunks.push({
+      text: "[Page " + pageNumber + "]\n" + buffer.trim(),
+      pageNumber: pageNumber
+    });
+  }
 
   // Break up any oversized chunks
   const finalChunks = [];
   for (const chunk of chunks) {
-    if (chunk.length > 1500) {
-      for (let k = 0; k < chunk.length; k += 1000) {
-        finalChunks.push(chunk.substring(k, Math.min(k + 1200, chunk.length)));
+    if (chunk.text.length > 2000) {
+      for (let k = 0; k < chunk.text.length; k += CHUNK_TARGET_SIZE) {
+        finalChunks.push({
+          text: chunk.text.substring(k, Math.min(k + CHUNK_TARGET_SIZE + 200, chunk.text.length)),
+          pageNumber: chunk.pageNumber
+        });
       }
     } else {
       finalChunks.push(chunk);
     }
   }
 
-  // Ensure we always return at least one chunk
-  if (finalChunks.length === 0) {
-    return [text.substring(0, 1200)];
+  // Ensure at least one chunk
+  if (finalChunks.length === 0 && pageText.trim().length > 0) {
+    finalChunks.push({
+      text: "[Page " + pageNumber + "]\n" + pageText.substring(0, CHUNK_TARGET_SIZE),
+      pageNumber: pageNumber
+    });
   }
 
-  Logger.log("Chunking result: " + finalChunks.length + " chunks from " + text.length + " chars");
   return finalChunks;
+}
+
+// Legacy wrapper for backward compatibility
+function engineeringChunk(text) {
+  const pageChunks = engineeringChunkPage(text, 1);
+  return pageChunks.map(c => c.text);
 }
 
 // ============================================================
