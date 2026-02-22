@@ -52,11 +52,13 @@ let globalConfig = { apiKey: null, folderId: null };
 function getActiveApiKey() { return globalConfig.apiKey; }
 function getActiveFolderId() { return globalConfig.folderId; }
 
-// Gemini models to try
+// Gemini models to try (ordered by reliability/availability)
 const GEMINI_MODELS = [
-  "gemini-2.0-flash",
   "gemini-1.5-flash",
-  "gemini-1.5-pro"
+  "gemini-1.5-pro",
+  "gemini-1.5-flash-latest",
+  "gemini-1.5-pro-latest",
+  "gemini-2.0-flash-exp"
 ];
 
 // Optional: set manually if you already have a database spreadsheet
@@ -304,10 +306,11 @@ function callGemini(contents, config = {}) {
         if (status === 200) {
           const result = JSON.parse(responseText);
           if (result.candidates && result.candidates[0].content && result.candidates[0].content.parts) {
+            Logger.log(`Gemini Success: ${model} (${v})`);
             return result.candidates[0].content.parts[0].text;
           }
         } else {
-          lastError = `Gemini ${model} error (${status}): ${responseText}`;
+          lastError = `Gemini ${model} ${v} - v${status}: ${responseText}`;
           Logger.log(lastError);
         }
       } catch (e) {
@@ -424,10 +427,11 @@ function uploadFile(data) {
     );
 
     let folder;
+    const folderId = getActiveFolderId();
     try {
-      folder = DriveApp.getFolderById(globalThis.ACTIVE_FOLDER_ID);
+      folder = DriveApp.getFolderById(folderId);
     } catch (e) {
-      return jsonResp({ error: "Invalid getActiveFolderId(). Check your config. ID: " + globalThis.ACTIVE_FOLDER_ID });
+      return jsonResp({ error: "DRIVE_ACCESS_ERROR", message: "Cannot access folder ID: " + folderId + ". Please check your Drive Folder ID in Settings." });
     }
 
     const file = folder.createFile(blob);
@@ -1001,13 +1005,18 @@ function deleteDocumentAction(data) {
 
 function syncDriveFiles() {
   try {
+    const folderId = getActiveFolderId();
+    if (!folderId) {
+      return jsonResp({ error: "MISSING_CONFIGURATION", message: "Drive Folder ID is not configured." });
+    }
+
     let folder;
     try {
-      folder = DriveApp.getFolderById(getActiveFolderId());
+      folder = DriveApp.getFolderById(folderId);
     } catch (e) {
       return jsonResp({
-        error: "Cannot open Drive folder. Check getActiveFolderId() in Code.gs. Current value: " +
-               getActiveFolderId() + ". Error: " + e.message
+        error: "DRIVE_ACCESS_ERROR",
+        message: "Cannot open folder ID: " + folderId + ". Ensure the Apps Script has 'Drive API' enabled and you have access."
       });
     }
 
