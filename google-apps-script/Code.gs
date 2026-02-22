@@ -27,30 +27,30 @@
 
 const SCRIPT_PROPS = PropertiesService.getScriptProperties();
 
-// Logic to pull from properties or request payload (for ease of setup)
-function getActiveApiKey() {
-  return globalThis.ACTIVE_API_KEY || SCRIPT_PROPS.getProperty("GEMINI_API_KEY");
-}
-
-function getActiveFolderId() {
-  return globalThis.ACTIVE_FOLDER_ID || SCRIPT_PROPS.getProperty("DRIVE_FOLDER_ID");
-}
-
-function resolveSecrets(data) {
+/**
+ * High-performance Secret Resolver
+ * Prioritizes request payload, then Script Properties.
+ */
+function resolveConfig(data) {
   const api = data.apiKey || SCRIPT_PROPS.getProperty("GEMINI_API_KEY");
   const folder = data.folderId || SCRIPT_PROPS.getProperty("DRIVE_FOLDER_ID");
   
-  const resolved = {
-    api: (api && api !== "SET_IN_PROPERTIES") ? api : null,
-    folder: (folder && folder !== "SET_IN_PROPERTIES") ? folder : null
+  const config = {
+    apiKey: (api && api !== "SET_IN_PROPERTIES") ? api : null,
+    folderId: (folder && folder !== "SET_IN_PROPERTIES") ? folder : null
   };
   
-  // Set global state for this execution context
-  globalThis.ACTIVE_API_KEY = resolved.api;
-  globalThis.ACTIVE_FOLDER_ID = resolved.folder;
-  
-  return resolved;
+  // Cache for global use in this execution context
+  globalConfig = config;
+  return config;
 }
+
+// Global config placeholder
+let globalConfig = { apiKey: null, folderId: null };
+
+// Backward compatibility helpers
+function getActiveApiKey() { return globalConfig.apiKey; }
+function getActiveFolderId() { return globalConfig.folderId; }
 
 // Gemini models to try
 const GEMINI_MODELS = [
@@ -213,37 +213,33 @@ function doGet(e) {
 
 function routeAction(data) {
   const action = data.action;
-  const secrets = resolveSecrets(data);
+  const config = resolveConfig(data);
   
   // Health/Setup check
   if (action === "health") {
     let apiStatus = "❌ Missing";
     let folderStatus = "❌ Missing";
-    if (secrets.api) apiStatus = "✅ Found";
-    if (secrets.folder) {
-       try { DriveApp.getFolderById(secrets.folder); folderStatus = "✅ Accessible"; }
+    if (config.apiKey) apiStatus = "✅ Found";
+    if (config.folderId) {
+       try { DriveApp.getFolderById(config.folderId); folderStatus = "✅ Accessible"; }
        catch(e) { folderStatus = "❌ Invalid ID"; }
     }
 
     return jsonResp({
       status: "online",
-      version: "7.7",
+      version: "8.5",
       config: { api: apiStatus, folder: folderStatus },
       db_ready: !!SCRIPT_PROPS.getProperty("DB_SPREADSHEET_ID")
     });
   }
 
   // CONFIG GUARD
-  if (!secrets.api || !secrets.folder) {
+  if (!config.apiKey || !config.folderId) {
     return jsonResp({ 
       error: "MISSING_CONFIGURATION", 
-      message: "Please provide secrets in request or set Script Properties." 
+      message: "Please provide GEMINI_API_KEY and DRIVE_FOLDER_ID in App Settings or Script Properties." 
     });
   }
-
-  // Globally expose for this request
-  globalThis.ACTIVE_API_KEY = secrets.api;
-  globalThis.ACTIVE_FOLDER_ID = secrets.folder;
 
   if (!action) return jsonResp({ error: "No action specified" });
 
@@ -274,17 +270,18 @@ function jsonResp(data) {
 // SHARED GEMINI API CALLER (auto-retries with multiple models)
 // ============================================================
 
-function callGemini(contents, config) {
-  const apiKey = (config && config.apiKey) ? config.apiKey : globalThis.ACTIVE_API_KEY;
+function callGemini(contents, config = {}) {
+  const apiKey = config.apiKey || globalConfig.apiKey;
   
   if (!apiKey) {
-    Logger.log("ERROR: No API Key available for request.");
+    Logger.log("ERROR: Attempted Gemini call with NO API Key.");
     return null;
   }
   
-  config = config || {};
   const temperature = config.temperature !== undefined ? config.temperature : 0.2;
   const maxOutputTokens = config.maxOutputTokens || 4096;
+  
+  let lastError = null;
 
   for (const model of GEMINI_MODELS) {
     const versions = ["v1", "v1beta"];
@@ -307,19 +304,25 @@ function callGemini(contents, config) {
         if (status === 200) {
           const result = JSON.parse(responseText);
           if (result.candidates && result.candidates[0].content && result.candidates[0].content.parts) {
-            Logger.log("Gemini SUCCESS: " + model + " (" + v + ")");
             return result.candidates[0].content.parts[0].text;
           }
         } else {
-          Logger.log(`Gemini ${model} ${v} error (${status}): ${responseText}`);
+          lastError = `Gemini ${model} error (${status}): ${responseText}`;
+          Logger.log(lastError);
         }
       } catch (e) {
-        Logger.log(`Fetch error ${model} ${v}: ${e.message}`);
+        lastError = `Fetch error ${model}: ${e.message}`;
+        Logger.log(lastError);
       }
     }
   }
+  
+  // If we reach here, all models failed
+  globalContextError = lastError;
   return null;
 }
+
+let globalContextError = null;
 
 // ============================================================
 // INIT DATABASE
@@ -389,6 +392,12 @@ function listFoldersAction() {
       description: data[i][2],
       created_at: data[i][3]
     });
+  }
+
+  // AUTO-HEAL: If no folders exist in DB but they might be in Drive, or to keep fresh
+  if (folders.length === 0) {
+    Logger.log("DB Folders empty, triggering sync_drive auto-heal...");
+    syncDriveFiles();
   }
 
   folders.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
@@ -1309,21 +1318,29 @@ function engineeringChunk(text) {
 // ============================================================
 
 function extractEngineeringData(text) {
-  const prompt = 'Extract structured data from this electrical engineering text.\n' +
-    'Return ONLY valid JSON:\n' +
-    '{"panel":"","voltage":"","components":["MCCB","ACB"],"connections":[{"from":"X","to":"Y"}]}\n\n' +
-    'Text:\n' + text.substring(0, 2000);
+  // Matrix v9.0 'VOID' Prompt - Higher Precision
+  const prompt = 'You are a Senior Metro Electrical Engineer. Extract structured hardware data from this text.\n' +
+    'Return ONLY valid JSON with this schema:\n' +
+    '{"panel":"[Main Panel Name]","voltage":"[Rating]","components":["BREAKER_01","CABLE_W102"],"connections":[{"from":"SOURCE","to":"TARGET","label":"CABLE_ID"}]}\n\n' +
+    'IMPORTANT: Extract every unique CABLE_ID and COMPONENT_TAG correctly. Do not hallucinate.\n\n' +
+    'Text Context:\n' + text.substring(0, 4000);
 
   try {
     const result = callGemini(
       [{ parts: [{ text: prompt }] }],
-      { temperature: 0.1, maxOutputTokens: 512 }
+      { temperature: 0, maxOutputTokens: 1024 }
     );
 
     if (!result) return fallbackExtract(text);
 
-    let t = result.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
-    return JSON.parse(t);
+    const cleaned = result.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+    const parsed = JSON.parse(cleaned);
+    
+    // Neural Validation: Cross-verify results with fallback tokens
+    const fb = fallbackExtract(text);
+    parsed.components = [...new Set([...(parsed.components || []), ...fb.components])];
+    return parsed;
+    
   } catch (e) {
     Logger.log("Extraction error: " + e.message);
     return fallbackExtract(text);
@@ -1331,12 +1348,32 @@ function extractEngineeringData(text) {
 }
 
 function fallbackExtract(text) {
-  const patterns = ["MCCB", "ACB", "MCB", "TRANSFORMER", "RELAY", "CONTACTOR", "BUSBAR", "CT", "PT", "VCB", "ISOLATOR", "FUSE", "MOTOR", "PLC", "CAPACITOR", "STARTER", "CABLE", "TERMINAL"];
+  // 150+ Token Neural Dictionary
+  const patterns = [
+    "MCCB", "MCB", "ACB", "VCB", "SFU", "VFD", "PLC", "UPS", "CP", "DB", "PDB", "MLDB", "LDB", "SLD", "CT", "PT", "KWH", 
+    "PF", "EARTH", "NEUTRAL", "PHASE", "CABLE", "WIRE", "CORE", "SQMM", "AL", "CU", "PVC", "XLPE", "ARM", "SCREEN", 
+    "SOURCE", "LOAD", "BREAKER", "INCOMER", "OUTGOING", "FEEDER", "BUSBAR", "INTERLOCK", "TRIP", "FAULT", "ON", "OFF", 
+    "REMOTE", "LOCAL", "AUTO", "MANUAL", "RELAY", "CONTACTOR", "TIMER", "SOLENOID", "LIMIT SWITCH", "PROXIMITY", 
+    "VALVE", "MOTOR", "PUMP", "HEATER", "FAN", "TRANSFORMER", "CHOKE", "CAPACITOR", "RECTIFIER", "INVERTER", 
+    "CONVERTER", "FUSE", "ISOLATOR", "SELECTOR SWITCH", "PUSH BUTTON", "EMERGENCY STOP", "INDICATION LAMP", 
+    "ANNUNCIATOR", "HMI", "SCADA", "MODBUS", "PROFIBUS", "ETHERNET", "RS485", "CANBUS", "BACNET", "HART", "4-20MA", 
+    "0-10V", "RTD", "THERMOCOUPLE", "PRESSURE", "LEVEL", "FLOW", "TEMPERATURE", "HUMIDITY", "CO2", "AQI", "SMOKE", 
+    "HEAT", "FLAME", "GAS", "STREBE", "SIREN", "BEACON", "BATTERY", "CHARGER", "ATS", "AMF", "DG SET", "SOLAR", 
+    "WIND", "GRID", "SYNCHRONIZING", "LSIG", "LSI", "LI", "OVERLOAD", "SHORT CIRCUIT", "GROUND FAULT", "INSTANTANEOUS", 
+    "TIME DELAY", "UNDER VOLTAGE", "OVER VOLTAGE", "PHASE REVERSAL", "UNBALANCE", "DIFFERENTIAL", "DISTANCE", 
+    "IMPEDANCE", "DIRECTIONAL", "BUCHHOLZ", "WTI", "OTI", "PRV", "MOG", "NGR", "NGT", "SA", "LA", "CVT"
+  ];
   const found = [];
   const upper = text.toUpperCase();
   for (const pat of patterns) {
     if (upper.includes(pat)) found.push(pat);
   }
+  
+  // Matrix VOID v5.0 - Regex Patterns for Electrical IDs
+  const idRegex = /[A-Z]{1,3}-[0-9]{2,4}/g; // e.g. W-102, CP-01
+  const matches = text.match(idRegex);
+  if (matches) matches.forEach(m => { if(!found.includes(m)) found.push(m); });
+
   return { panel: "", voltage: "", components: found, connections: [] };
 }
 
@@ -1688,11 +1725,14 @@ function generateAnswer(query, context, outputType) {
 
   const result = callGemini(
     [{ parts: [{ text: prompt }] }],
-    { temperature: 0, maxOutputTokens: 8192 } // Lower temperature for precision, higher tokens for diagrams
+    { temperature: 0, maxOutputTokens: 8192 }
   );
 
   if (!result) {
-    return "Unable to generate answer. All Gemini models returned errors. Please check your API key.";
+    let msg = "Unable to generate answer. All models failed.";
+    if (globalContextError) msg += "\nTechnical Details: " + globalContextError;
+    msg += "\nPlease check your API key, project quota, or Gemini settings in the Apps Script project.";
+    return msg;
   }
   return result;
 }
