@@ -1,64 +1,38 @@
 // ============================================================
-// MetroCircuit AI — Google Apps Script Backend v4.0 (V8 Runtime)
-// 🚀 ZERO EXTERNAL DEPENDENCIES — Google Sheets as Database
-// Deploy as Web App: Execute as Me, Access: Anyone
-// ============================================================
-//
-// SETUP:
-// 1. Create new Apps Script project at script.google.com
-// 2. Paste this entire code
-// 3. Set GEMINI_API_KEY & DRIVE_FOLDER_ID in Project Settings -> Script Properties
-// 4. Enable "Drive API" v2 in Services (+ icon in sidebar)
-// 5. In appsscript.json -> ensure "runtimeVersion": "V8"
-// 7. Deploy → New Deployment → Web App
-//    - Execute as: Me | Access: Anyone
-// 8. Copy deployment URL to MetroCircuit Settings page
-// 9. Click "Initialize DB" button in Settings
-//
-// That's it! No Supabase, no external database needed.
-// ============================================================
-
-// ============================================================
-// SECURITY: Using Script Properties instead of hardcoding
-// Set these in Apps Script Settings → Script Properties:
-// - GEMINI_API_KEY
-// - DRIVE_FOLDER_ID
+// CORE CONFIGURATION & SECRET RESOLVER
 // ============================================================
 
 const SCRIPT_PROPS = PropertiesService.getScriptProperties();
+let globalConfig = { apiKey: null, folderId: null };
 
 /**
- * High-performance Secret Resolver
- * Prioritizes request payload, then Script Properties.
+ * Resolves the active configuration for the current request.
+ * Prioritizes keys sent from the frontend over Script Properties.
  */
-function resolveConfig(data) {
-  const api = data.apiKey || SCRIPT_PROPS.getProperty("GEMINI_API_KEY");
-  const folder = data.folderId || SCRIPT_PROPS.getProperty("DRIVE_FOLDER_ID");
+function resolveConfig(payload) {
+  const p = payload || {};
+  const api = p.apiKey || SCRIPT_PROPS.getProperty("GEMINI_API_KEY");
+  const folder = p.folderId || SCRIPT_PROPS.getProperty("DRIVE_FOLDER_ID");
   
-  const config = {
+  globalConfig = {
     apiKey: (api && api !== "SET_IN_PROPERTIES") ? api : null,
     folderId: (folder && folder !== "SET_IN_PROPERTIES") ? folder : null
   };
   
-  // Cache for global use in this execution context
-  globalConfig = config;
-  return config;
+  return globalConfig;
 }
 
-// Global config placeholder
-let globalConfig = { apiKey: null, folderId: null };
+// Accessor helpers (always use these)
+const getApiKey = () => globalConfig.apiKey;
+const getFolderId = () => globalConfig.folderId;
 
-// Backward compatibility helpers
-function getActiveApiKey() { return globalConfig.apiKey; }
-function getActiveFolderId() { return globalConfig.folderId; }
-
-// Gemini models to try (ordered by reliability/availability)
+// Gemini Model Matrix - Dynamic Fallback
 const GEMINI_MODELS = [
-  "gemini-1.5-flash",
-  "gemini-1.5-pro",
-  "gemini-1.5-flash-latest",
-  "gemini-1.5-pro-latest",
-  "gemini-2.0-flash-exp"
+  { id: "gemini-1.5-flash", version: "v1" },
+  { id: "gemini-1.5-flash-latest", version: "v1beta" },
+  { id: "gemini-1.5-pro", version: "v1" },
+  { id: "gemini-1.5-pro-latest", version: "v1beta" },
+  { id: "gemini-2.0-flash-exp", version: "v1beta" }
 ];
 
 // Optional: set manually if you already have a database spreadsheet
@@ -118,7 +92,7 @@ function getDB() {
   // Move to Drive folder if possible
   try {
     const file = DriveApp.getFileById(ss.getId());
-    const folder = DriveApp.getFolderById(getActiveFolderId());
+    const folder = DriveApp.getFolderById(getFolderId());
     folder.addFile(file);
     DriveApp.getRootFolder().removeFile(file);
   } catch (e) {
@@ -203,10 +177,10 @@ function doGet(e) {
     `<html>
       <body style="font-family: sans-serif; padding: 20px; background: #0f172a; color: #f8fafc;">
         <h2 style="color: #3b82f6;">🚇 MetroCircuit AI Backend v7.6</h2>
-        <p>Status API Key: ${getActiveApiKey() ? "✅ Ready" : "❌ Missing"}</p>
-        <p>Status Folder: ${getActiveFolderId() ? "✅ Ready" : "❌ Missing"}</p>
+        <p>Status API Key: ${getApiKey() ? "✅ Ready" : "❌ Missing"}</p>
+        <p>Status Folder: ${getFolderId() ? "✅ Ready" : "❌ Missing"}</p>
         <hr style="border: 0; border-top: 1px solid #334155;">
-        <p><b>Configuration Required?</b> If you see red marks, go to <b>Project Settings -> Script Properties</b> in the Apps Script editor and add <code>getActiveApiKey()</code> and <code>getActiveFolderId()</code>.</p>
+        <p><b>Configuration Required?</b> If you see red marks, go to <b>Project Settings -> Script Properties</b> in the Apps Script editor and add <code>getApiKey()</code> and <code>getFolderId()</code>.</p>
         <p>Alternatively, run the <code>RUN_THIS_FOR_SETUP</code> function in the editor.</p>
       </body>
     </html>`
@@ -224,12 +198,12 @@ function routeAction(data) {
     if (config.apiKey) apiStatus = "✅ Found";
     if (config.folderId) {
        try { DriveApp.getFolderById(config.folderId); folderStatus = "✅ Accessible"; }
-       catch(e) { folderStatus = "❌ Invalid ID"; }
+       catch(e) { folderStatus = "❌ Invalid ID or Permission Denied"; }
     }
 
     return jsonResp({
       status: "online",
-      version: "8.5",
+      version: "11.0",
       config: { api: apiStatus, folder: folderStatus },
       db_ready: !!SCRIPT_PROPS.getProperty("DB_SPREADSHEET_ID")
     });
@@ -239,7 +213,7 @@ function routeAction(data) {
   if (!config.apiKey || !config.folderId) {
     return jsonResp({ 
       error: "MISSING_CONFIGURATION", 
-      message: "Please provide GEMINI_API_KEY and DRIVE_FOLDER_ID in App Settings or Script Properties." 
+      message: "Please configure GEMINI_API_KEY and DRIVE_FOLDER_ID in App Settings or Script Properties." 
     });
   }
 
@@ -273,7 +247,7 @@ function jsonResp(data) {
 // ============================================================
 
 function callGemini(contents, config = {}) {
-  const apiKey = config.apiKey || globalConfig.apiKey;
+  const apiKey = config.apiKey || getApiKey();
   
   if (!apiKey) {
     Logger.log("ERROR: Attempted Gemini call with NO API Key.");
@@ -283,45 +257,43 @@ function callGemini(contents, config = {}) {
   const temperature = config.temperature !== undefined ? config.temperature : 0.2;
   const maxOutputTokens = config.maxOutputTokens || 4096;
   
-  let lastError = null;
+  let errors = [];
 
   for (const model of GEMINI_MODELS) {
-    const versions = ["v1", "v1beta"];
-    for (const v of versions) {
-      try {
-        const url = `https://generativelanguage.googleapis.com/${v}/models/${model}:generateContent?key=${apiKey}`;
-        const res = UrlFetchApp.fetch(url, {
-          method: "post",
-          contentType: "application/json",
-          payload: JSON.stringify({
-            contents: contents,
-            generationConfig: { temperature, maxOutputTokens }
-          }),
-          muteHttpExceptions: true
-        });
+    try {
+      const url = `https://generativelanguage.googleapis.com/${model.version}/models/${model.id}:generateContent?key=${apiKey}`;
+      const res = UrlFetchApp.fetch(url, {
+        method: "post",
+        contentType: "application/json",
+        payload: JSON.stringify({
+          contents: contents,
+          generationConfig: { temperature, maxOutputTokens }
+        }),
+        muteHttpExceptions: true
+      });
 
-        const status = res.getResponseCode();
-        const responseText = res.getContentText();
-        
-        if (status === 200) {
-          const result = JSON.parse(responseText);
-          if (result.candidates && result.candidates[0].content && result.candidates[0].content.parts) {
-            Logger.log(`Gemini Success: ${model} (${v})`);
-            return result.candidates[0].content.parts[0].text;
-          }
-        } else {
-          lastError = `Gemini ${model} ${v} - v${status}: ${responseText}`;
-          Logger.log(lastError);
+      const status = res.getResponseCode();
+      const responseText = res.getContentText();
+      
+      if (status === 200) {
+        const result = JSON.parse(responseText);
+        if (result.candidates && result.candidates[0].content && result.candidates[0].content.parts) {
+          return result.candidates[0].content.parts[0].text;
         }
-      } catch (e) {
-        lastError = `Fetch error ${model}: ${e.message}`;
-        Logger.log(lastError);
+      } else {
+        const err = `Gemini ${model.id} (${model.version}) - Error ${status}: ${responseText}`;
+        errors.push(err);
+        Logger.log(err);
       }
+    } catch (e) {
+      const err = `Fetch Error ${model.id}: ${e.message}`;
+      errors.push(err);
+      Logger.log(err);
     }
   }
   
-  // If we reach here, all models failed
-  globalContextError = lastError;
+  // If we reach here, all failed
+  globalContextError = errors.join("\n---\n");
   return null;
 }
 
@@ -427,7 +399,7 @@ function uploadFile(data) {
     );
 
     let folder;
-    const folderId = getActiveFolderId();
+    const folderId = getFolderId();
     try {
       folder = DriveApp.getFolderById(folderId);
     } catch (e) {
@@ -1005,74 +977,47 @@ function deleteDocumentAction(data) {
 
 function syncDriveFiles() {
   try {
-    const folderId = getActiveFolderId();
-    if (!folderId) {
-      return jsonResp({ error: "MISSING_CONFIGURATION", message: "Drive Folder ID is not configured." });
-    }
+    const folderId = getFolderId();
+    if (!folderId) return jsonResp({ error: "Missing Folder ID" });
 
-    let folder;
-    try {
-      folder = DriveApp.getFolderById(folderId);
-    } catch (e) {
-      return jsonResp({
-        error: "DRIVE_ACCESS_ERROR",
-        message: "Cannot open folder ID: " + folderId + ". Ensure the Apps Script has 'Drive API' enabled and you have access."
-      });
-    }
-
-    const files = folder.getFiles();
     const synced = [];
-
-    // Get existing drive file IDs
     const docSheet = getSheet("Documents");
     const docData = docSheet.getDataRange().getValues();
-    const existingDriveIds = new Set();
-    for (let i = 1; i < docData.length; i++) {
-      if (docData[i][3]) existingDriveIds.add(String(docData[i][3]));
+    const existingIds = new Set(docData.slice(1).map(r => String(r[3])));
+    const dbId = PropertiesService.getScriptProperties().getProperty("DB_SPREADSHEET_ID") || "";
+
+    // ── Recursive Sync Implementation ──
+    const processFolder = (folder) => {
+      const files = folder.getFiles();
+      while (files.hasNext()) {
+        const file = files.next();
+        const fId = file.getId();
+        if (existingIds.has(fId) || fId === dbId) continue;
+        if (file.getMimeType() === "application/vnd.google-apps.form") continue;
+
+        const docId = Utilities.getUuid();
+        docSheet.appendRow([
+          docId, file.getName(), folder.getId(), fId,
+          file.getMimeType(), "uploaded", 0, new Date().toISOString()
+        ]);
+        synced.push({ name: file.getName(), id: docId });
+      }
+      
+      const subfolders = folder.getFolders();
+      while (subfolders.hasNext()) {
+        processFolder(subfolders.next());
+      }
+    };
+
+    try {
+      processFolder(DriveApp.getFolderById(folderId));
+    } catch (e) {
+      return jsonResp({ error: "Drive Access Denied: " + e.message });
     }
 
-    // Get the DB spreadsheet ID to skip it
-    const props = PropertiesService.getScriptProperties();
-    const dbId = props.getProperty("DB_SPREADSHEET_ID") || "";
-
-    while (files.hasNext()) {
-      const file = files.next();
-      const fileId = file.getId();
-
-      // Skip already-synced files
-      if (existingDriveIds.has(fileId)) continue;
-
-      // Skip the database spreadsheet
-      if (fileId === dbId) continue;
-
-      // Skip Google Forms
-      if (file.getMimeType() === "application/vnd.google-apps.form") continue;
-
-      const docId = Utilities.getUuid();
-      const now = new Date().toISOString();
-
-      docSheet.appendRow([
-        docId,
-        file.getName(),
-        "",
-        fileId,
-        file.getMimeType(),
-        "uploaded",
-        0,
-        now
-      ]);
-
-      synced.push({ name: file.getName(), id: docId, type: file.getMimeType() });
-    }
-
-    return jsonResp({
-      status: "synced",
-      newFiles: synced.length,
-      files: synced
-    });
+    return jsonResp({ status: "synced", newFiles: synced.length, files: synced });
   } catch (err) {
-    Logger.log("Sync error: " + err.message + "\n" + err.stack);
-    return jsonResp({ error: "Drive sync failed: " + err.message });
+    return jsonResp({ error: "Sync failed: " + err.message });
   }
 }
 
@@ -1393,10 +1338,10 @@ function fallbackExtract(text) {
 function getGeminiEmbedding(text) {
   // Try every known embedding endpoint
   const models = [
-    "https://generativelanguage.googleapis.com/v1/models/text-embedding-004:embedContent?key=" + getActiveApiKey(),
-    "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key=" + getActiveApiKey(),
-    "https://generativelanguage.googleapis.com/v1/models/embedding-001:embedContent?key=" + getActiveApiKey(),
-    "https://generativelanguage.googleapis.com/v1beta/models/embedding-001:embedContent?key=" + getActiveApiKey()
+    "https://generativelanguage.googleapis.com/v1/models/text-embedding-004:embedContent?key=" + getApiKey(),
+    "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key=" + getApiKey(),
+    "https://generativelanguage.googleapis.com/v1/models/embedding-001:embedContent?key=" + getApiKey(),
+    "https://generativelanguage.googleapis.com/v1beta/models/embedding-001:embedContent?key=" + getApiKey()
   ];
 
   const payload = JSON.stringify({
@@ -1715,19 +1660,18 @@ function generateAnswer(query, context, outputType) {
       '{"summary":"","components":[],"connections":[{"from":"","to":"","cable_id":"","specs":"","description":""}],"voltage_levels":[],"panel_info":"","notes"}. ' +
       "Be 100% precise with cable IDs and connection paths. If info is missing, say 'DATA_MISSING'.";
   } else if (outputType === "schematic") {
-    prompt = "You are an electrical schematic expert. Convert the context into a graph structure for React Flow. " +
-      "You MUST extract every connection. For cables, include Core count and Cross-section in the label. " +
-      "Return ONLY JSON: " +
-      '{"components":[{"id":"unique_id","type":"ComponentType (MCCB, BUSBAR, etc)","label":"Full Name"}],"connections":[{"from":"ComponentName","to":"ComponentName","label":"Cable info"}]} ' +
-      "If you see a loop, include it. If a cable is 'W-01', the connection label MUST be 'W-01'.";
-  } else if (outputType === "wiring") {
-    prompt = "You are a Lead Wiring Inspector. Provide a detailed, scratch-level technical report on the wiring/cabling described in the context. " +
-      "Identify EVERY cable, its source, destination, and specifications (sqmm, core, material). " +
-      "Check for consistency across the document. Cite your sources [Source X, Page Y].";
+    prompt = "You are a Forensic Electrical Schematic Expert. Your goal is to generate a 100% accurate mathematical graph for React Flow.\n\n" +
+      "RULES:\n" +
+      "1. Extract EVERY component ID (e.g. MCCB-01, W-102).\n" +
+      "2. For connections, identifying the EXACT 'from' and 'to' is mandatory. If a cable links them, put the CABLE ID in the label.\n" +
+      "3. Use standard electrical node types: BREAKER, BUSBAR, PANEL, TRANSFORMER, MOTOR, SOURCE, LOAD.\n" +
+      "4. Return ONLY valid JSON: " +
+      '{"components":[{"id":"uid","type":"TYPE","label":"NAME"}],"connections":[{"from":"ID1","to":"ID2","label":"CABLE/SPECS"}]}\n\n' +
+      "CONTEXT:\n" + context.substring(0, 10000);
   } else {
-    prompt = "You are a Senior Metro Project Manager. Answer the query based ONLY on the context. " +
-      "Use technical terminology. If you cannot find the answer, say you don't know based on provided docs. " +
-      "Format as a professional technical response with sources [Source X].";
+    prompt = "You are a Senior Metro Project Manager and Chief Electrical Auditor. Answer the query based ONLY on the context.\n" +
+      "Use professional, engineering-grade terminology. Be precise with units and IDs.\n" +
+      "Format: A professional technical summary followed by bulleted evidence with citations [Source X, Page Y].";
   }
 
   prompt += "\n\nCONTEXT:\n" + context.substring(0, 12000) + "\n\nQUERY:\n" + query;
@@ -1748,35 +1692,32 @@ function generateAnswer(query, context, outputType) {
 
 // ── Multi-Agent Router ──
 function agentRouter(query) {
-  const prompt = "Analyze this electrical engineering query. Identify if the user wants: " +
-    "1. TEXT_ANSWER (general info), 2. CABLE_DETAILS (specific cable/wiring info), 3. SCHEMATIC (diagram generation). " +
-    "Return JSON: {\"intent\":\"...\", \"expandedKeywords\":[\"synonyms\",\"units\"]}\n\n" +
+  const prompt = "Analyze this Metro Infrastructure query. Intents:\n" +
+    "1. TEXT_ANSWER: General info\n" +
+    "2. CABLE_DETAILS: Specific wire/cable specs/counts\n" +
+    "3. SCHEMATIC: Generate electrical diagram JSON\n" +
+    "4. VOICE_DISCOVERY: Spoken-style natural query\n\n" +
+    "Return JSON: {\"intent\":\"...\", \"expandedKeywords\":[\"synonyms\",\"units\"], \"outputFormat\":\"text|json|schematic\"}\n\n" +
     "Query: " + query;
     
   try {
     const res = callGemini([{ parts: [{ text: prompt }] }], { temperature: 0, maxOutputTokens: 256 });
     if (res) {
-      // Improved cleanup for robust parsing
       const cleaned = res.replace(/```(?:json)?/g, "").replace(/```/g, "").trim();
-      let parsed;
-      try {
-        parsed = JSON.parse(cleaned);
-      } catch (e) {
-        // Attempt aggressive cleanup if standard parse fails
-        const aggressive = cleaned.substring(cleaned.indexOf('{'), cleaned.lastIndexOf('}') + 1);
-        parsed = JSON.parse(aggressive);
-      }
+      let parsed = JSON.parse(cleaned);
       
       parsed.expandedKeywords = parsed.expandedKeywords || [];
       if (parsed.intent === "CABLE_DETAILS") {
-        parsed.expandedKeywords = [...new Set([...parsed.expandedKeywords, "core", "sqmm", "wire", "cable", "armor", "screen", "rating", "current"])];
+        parsed.expandedKeywords = [...new Set([...parsed.expandedKeywords, "core", "sqmm", "wire", "cable", "armor", "screen", "rating", "current", "conductor"])];
       } else if (parsed.intent === "SCHEMATIC") {
-        parsed.expandedKeywords = [...new Set([...parsed.expandedKeywords, "SLD", "drawing", "circuit", "connection", "feeder", "breaker", "busbar", "interconnect", "schematic"])];
+        parsed.expandedKeywords = [...new Set([...parsed.expandedKeywords, "SLD", "drawing", "circuit", "connection", "feeder", "breaker", "busbar", "interconnect", "schematic", "line diagram"])];
       }
       return parsed;
     }
-  } catch (e) {}
-  return { intent: "TEXT_ANSWER", expandedKeywords: [] };
+  } catch (e) {
+    Logger.log("Router failed: " + e.message);
+  }
+  return { intent: "TEXT_ANSWER", expandedKeywords: [], outputFormat: "text" };
 }
 
 // ── Multi-Agent Expert Verification (The "100% Match" Engine) ──
