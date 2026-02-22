@@ -26,18 +26,46 @@
 // ============================================================
 
 const SCRIPT_PROPS = PropertiesService.getScriptProperties();
-const GEMINI_API_KEY = SCRIPT_PROPS.getProperty("GEMINI_API_KEY") || "SET_IN_PROPERTIES";
-const DRIVE_FOLDER_ID = SCRIPT_PROPS.getProperty("DRIVE_FOLDER_ID") || "SET_IN_PROPERTIES";
 
-// Optional: set manually if you already have a database spreadsheet
-const SPREADSHEET_ID_OVERRIDE = "";
+// Logic to pull from properties or request payload (for ease of setup)
+let _KEY_CACHE = { api: null, folder: null };
 
-// Gemini models to try in order (newest → oldest)
+function resolveSecrets(data) {
+  const api = data.apiKey || SCRIPT_PROPS.getProperty("GEMINI_API_KEY");
+  const folder = data.folderId || SCRIPT_PROPS.getProperty("DRIVE_FOLDER_ID");
+  
+  return {
+    api: (api && api !== "SET_IN_PROPERTIES") ? api : null,
+    folder: (folder && folder !== "SET_IN_PROPERTIES") ? folder : null
+  };
+}
+
+// Gemini models to try
 const GEMINI_MODELS = [
   "gemini-2.0-flash",
   "gemini-1.5-flash",
   "gemini-1.5-pro"
 ];
+
+// MANUAL SETUP HELPER: Run this function once in the Apps Script Editor to set your keys!
+function RUN_THIS_FOR_SETUP() {
+  const ui = SpreadsheetApp.getUi();
+  const apiResp = ui.prompt("SETUP: Enter Gemini API Key", "Get it from aistudio.google.com", ui.ButtonSet.OK_CANCEL);
+  if (apiResp.getSelectedButton() == ui.Button.OK) {
+    PropertiesService.getScriptProperties().setProperty("GEMINI_API_KEY", apiResp.getResponseText());
+  }
+  
+  const folderResp = ui.prompt("SETUP: Enter Drive Folder ID", "Leave blank to auto-create 'MetroCircuit_Data'", ui.ButtonSet.OK_CANCEL);
+  if (folderResp.getSelectedButton() == ui.Button.OK) {
+    let fId = folderResp.getResponseText();
+    if (!fId) {
+      const folder = DriveApp.createFolder("MetroCircuit_Data");
+      fId = folder.getId();
+    }
+    PropertiesService.getScriptProperties().setProperty("DRIVE_FOLDER_ID", fId);
+  }
+  ui.alert("Setup Complete! Please refresh your web app.");
+}
 
 // Batch processing config
 const BATCH_PAGE_SIZE = 10;          // Pages per batch call
@@ -131,6 +159,10 @@ function getSheet(name) {
 // REQUEST ROUTING
 // ============================================================
 
+// ============================================================
+// REQUEST ROUTING
+// ============================================================
+
 function doPost(e) {
   try {
     const data = JSON.parse(e.postData.contents);
@@ -143,22 +175,64 @@ function doPost(e) {
 
 function doGet(e) {
   const params = e.parameter || {};
+  
+  // Health check/API interface
   if (params.action) {
-    try {
-      return routeAction(params);
-    } catch (err) {
-      return jsonResp({ error: err.message });
-    }
+    return routeAction(params);
   }
-  return jsonResp({
-    status: "MetroCircuit AI Backend v4.0 (V8) is running",
-    database: "Google Sheets",
-    timestamp: new Date().toISOString()
-  });
+  
+  // Simple landing page for debugging
+  return HtmlService.createHtmlOutput(
+    `<html>
+      <body style="font-family: sans-serif; padding: 20px; background: #0f172a; color: #f8fafc;">
+        <h2 style="color: #3b82f6;">🚇 MetroCircuit AI Backend v7.6</h2>
+        <p>Status API Key: ${GEMINI_API_KEY ? "✅ Ready" : "❌ Missing"}</p>
+        <p>Status Folder: ${DRIVE_FOLDER_ID ? "✅ Ready" : "❌ Missing"}</p>
+        <hr style="border: 0; border-top: 1px solid #334155;">
+        <p><b>Configuration Required?</b> If you see red marks, go to <b>Project Settings -> Script Properties</b> in the Apps Script editor and add <code>GEMINI_API_KEY</code> and <code>DRIVE_FOLDER_ID</code>.</p>
+        <p>Alternatively, run the <code>RUN_THIS_FOR_SETUP</code> function in the editor.</p>
+      </body>
+    </html>`
+  ).setTitle("Backend Status");
 }
 
 function routeAction(data) {
-  switch (data.action) {
+  const action = data.action;
+  const secrets = resolveSecrets(data);
+  
+  // Health/Setup check
+  if (action === "health") {
+    let apiStatus = "❌ Missing";
+    let folderStatus = "❌ Missing";
+    if (secrets.api) apiStatus = "✅ Found";
+    if (secrets.folder) {
+       try { DriveApp.getFolderById(secrets.folder); folderStatus = "✅ Accessible"; }
+       catch(e) { folderStatus = "❌ Invalid ID"; }
+    }
+
+    return jsonResp({
+      status: "online",
+      version: "7.7",
+      config: { api: apiStatus, folder: folderStatus },
+      db_ready: !!SCRIPT_PROPS.getProperty("DB_SPREADSHEET_ID")
+    });
+  }
+
+  // CONFIG GUARD
+  if (!secrets.api || !secrets.folder) {
+    return jsonResp({ 
+      error: "MISSING_CONFIGURATION", 
+      message: "Please provide secrets in request or set Script Properties." 
+    });
+  }
+
+  // Globally expose for this request
+  globalThis.ACTIVE_API_KEY = secrets.api;
+  globalThis.ACTIVE_FOLDER_ID = secrets.folder;
+
+  if (!action) return jsonResp({ error: "No action specified" });
+
+  switch (action) {
     case "init_db":             return initDB();
     case "upload":              return uploadFile(data);
     case "list_documents":      return listDocuments(data);
@@ -172,7 +246,6 @@ function routeAction(data) {
     case "list_folders":        return listFoldersAction();
     case "query":               return handleQuery(data);
     case "sync_drive":          return syncDriveFiles();
-    case "health":              return jsonResp({ status: "ok", version: "6.0 (Multi-Agent RAG)", db: "sheets", runtime: "V8", batchProcessing: true });
     default:                    return jsonResp({ error: "Unknown action: " + data.action });
   }
 }
@@ -187,16 +260,22 @@ function jsonResp(data) {
 // ============================================================
 
 function callGemini(contents, config) {
+  const apiKey = (config && config.apiKey) ? config.apiKey : globalThis.ACTIVE_API_KEY;
+  
+  if (!apiKey) {
+    Logger.log("ERROR: No API Key available for request.");
+    return null;
+  }
+  
   config = config || {};
   const temperature = config.temperature !== undefined ? config.temperature : 0.2;
   const maxOutputTokens = config.maxOutputTokens || 4096;
 
   for (const model of GEMINI_MODELS) {
-    // Try both v1 and v1beta endpoints
     const versions = ["v1", "v1beta"];
     for (const v of versions) {
       try {
-        const url = "https://generativelanguage.googleapis.com/" + v + "/models/" + model + ":generateContent?key=" + GEMINI_API_KEY;
+        const url = `https://generativelanguage.googleapis.com/${v}/models/${model}:generateContent?key=${apiKey}`;
         const res = UrlFetchApp.fetch(url, {
           method: "post",
           contentType: "application/json",
@@ -207,17 +286,20 @@ function callGemini(contents, config) {
           muteHttpExceptions: true
         });
 
-        const statusCode = res.getResponseCode();
-        if (statusCode === 200) {
-          const result = JSON.parse(res.getContentText());
-          if (result.candidates && result.candidates[0] && result.candidates[0].content) {
-            Logger.log("Gemini OK via model: " + model + " (" + v + ")");
+        const status = res.getResponseCode();
+        const responseText = res.getContentText();
+        
+        if (status === 200) {
+          const result = JSON.parse(responseText);
+          if (result.candidates && result.candidates[0].content && result.candidates[0].content.parts) {
+            Logger.log("Gemini SUCCESS: " + model + " (" + v + ")");
             return result.candidates[0].content.parts[0].text;
           }
+        } else {
+          Logger.log(`Gemini ${model} ${v} error (${status}): ${responseText}`);
         }
-        Logger.log("Model " + model + " (" + v + ") failed: " + statusCode);
       } catch (e) {
-        Logger.log("Model " + model + " (" + v + ") fetch error: " + e.message);
+        Logger.log(`Fetch error ${model} ${v}: ${e.message}`);
       }
     }
   }
@@ -319,9 +401,9 @@ function uploadFile(data) {
 
     let folder;
     try {
-      folder = DriveApp.getFolderById(DRIVE_FOLDER_ID);
+      folder = DriveApp.getFolderById(globalThis.ACTIVE_FOLDER_ID);
     } catch (e) {
-      return jsonResp({ error: "Invalid DRIVE_FOLDER_ID. Check your Apps Script config. ID: " + DRIVE_FOLDER_ID });
+      return jsonResp({ error: "Invalid DRIVE_FOLDER_ID. Check your config. ID: " + globalThis.ACTIVE_FOLDER_ID });
     }
 
     const file = folder.createFile(blob);

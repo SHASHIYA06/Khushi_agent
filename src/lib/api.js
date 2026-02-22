@@ -28,7 +28,11 @@ async function callBackend(payload) {
             method: 'POST',
             redirect: 'follow',
             headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-            body: JSON.stringify(payload),
+            body: JSON.stringify({
+                ...payload,
+                apiKey: config.GEMINI_API_KEY,
+                folderId: config.DRIVE_FOLDER_ID
+            }),
         });
 
         const text = await res.text();
