@@ -28,16 +28,28 @@
 const SCRIPT_PROPS = PropertiesService.getScriptProperties();
 
 // Logic to pull from properties or request payload (for ease of setup)
-let _KEY_CACHE = { api: null, folder: null };
+function getActiveApiKey() {
+  return globalThis.ACTIVE_API_KEY || SCRIPT_PROPS.getProperty("GEMINI_API_KEY");
+}
+
+function getActiveFolderId() {
+  return globalThis.ACTIVE_FOLDER_ID || SCRIPT_PROPS.getProperty("DRIVE_FOLDER_ID");
+}
 
 function resolveSecrets(data) {
   const api = data.apiKey || SCRIPT_PROPS.getProperty("GEMINI_API_KEY");
   const folder = data.folderId || SCRIPT_PROPS.getProperty("DRIVE_FOLDER_ID");
   
-  return {
+  const resolved = {
     api: (api && api !== "SET_IN_PROPERTIES") ? api : null,
     folder: (folder && folder !== "SET_IN_PROPERTIES") ? folder : null
   };
+  
+  // Set global state for this execution context
+  globalThis.ACTIVE_API_KEY = resolved.api;
+  globalThis.ACTIVE_FOLDER_ID = resolved.folder;
+  
+  return resolved;
 }
 
 // Gemini models to try
@@ -46,6 +58,9 @@ const GEMINI_MODELS = [
   "gemini-1.5-flash",
   "gemini-1.5-pro"
 ];
+
+// Optional: set manually if you already have a database spreadsheet
+const SPREADSHEET_ID_OVERRIDE = "";
 
 // MANUAL SETUP HELPER: Run this function once in the Apps Script Editor to set your keys!
 function RUN_THIS_FOR_SETUP() {
@@ -101,7 +116,7 @@ function getDB() {
   // Move to Drive folder if possible
   try {
     const file = DriveApp.getFileById(ss.getId());
-    const folder = DriveApp.getFolderById(DRIVE_FOLDER_ID);
+    const folder = DriveApp.getFolderById(getActiveFolderId());
     folder.addFile(file);
     DriveApp.getRootFolder().removeFile(file);
   } catch (e) {
@@ -186,10 +201,10 @@ function doGet(e) {
     `<html>
       <body style="font-family: sans-serif; padding: 20px; background: #0f172a; color: #f8fafc;">
         <h2 style="color: #3b82f6;">🚇 MetroCircuit AI Backend v7.6</h2>
-        <p>Status API Key: ${GEMINI_API_KEY ? "✅ Ready" : "❌ Missing"}</p>
-        <p>Status Folder: ${DRIVE_FOLDER_ID ? "✅ Ready" : "❌ Missing"}</p>
+        <p>Status API Key: ${getActiveApiKey() ? "✅ Ready" : "❌ Missing"}</p>
+        <p>Status Folder: ${getActiveFolderId() ? "✅ Ready" : "❌ Missing"}</p>
         <hr style="border: 0; border-top: 1px solid #334155;">
-        <p><b>Configuration Required?</b> If you see red marks, go to <b>Project Settings -> Script Properties</b> in the Apps Script editor and add <code>GEMINI_API_KEY</code> and <code>DRIVE_FOLDER_ID</code>.</p>
+        <p><b>Configuration Required?</b> If you see red marks, go to <b>Project Settings -> Script Properties</b> in the Apps Script editor and add <code>getActiveApiKey()</code> and <code>getActiveFolderId()</code>.</p>
         <p>Alternatively, run the <code>RUN_THIS_FOR_SETUP</code> function in the editor.</p>
       </body>
     </html>`
@@ -403,7 +418,7 @@ function uploadFile(data) {
     try {
       folder = DriveApp.getFolderById(globalThis.ACTIVE_FOLDER_ID);
     } catch (e) {
-      return jsonResp({ error: "Invalid DRIVE_FOLDER_ID. Check your config. ID: " + globalThis.ACTIVE_FOLDER_ID });
+      return jsonResp({ error: "Invalid getActiveFolderId(). Check your config. ID: " + globalThis.ACTIVE_FOLDER_ID });
     }
 
     const file = folder.createFile(blob);
@@ -979,11 +994,11 @@ function syncDriveFiles() {
   try {
     let folder;
     try {
-      folder = DriveApp.getFolderById(DRIVE_FOLDER_ID);
+      folder = DriveApp.getFolderById(getActiveFolderId());
     } catch (e) {
       return jsonResp({
-        error: "Cannot open Drive folder. Check DRIVE_FOLDER_ID in Code.gs. Current value: " +
-               DRIVE_FOLDER_ID + ". Error: " + e.message
+        error: "Cannot open Drive folder. Check getActiveFolderId() in Code.gs. Current value: " +
+               getActiveFolderId() + ". Error: " + e.message
       });
     }
 
@@ -1332,10 +1347,10 @@ function fallbackExtract(text) {
 function getGeminiEmbedding(text) {
   // Try every known embedding endpoint
   const models = [
-    "https://generativelanguage.googleapis.com/v1/models/text-embedding-004:embedContent?key=" + GEMINI_API_KEY,
-    "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key=" + GEMINI_API_KEY,
-    "https://generativelanguage.googleapis.com/v1/models/embedding-001:embedContent?key=" + GEMINI_API_KEY,
-    "https://generativelanguage.googleapis.com/v1beta/models/embedding-001:embedContent?key=" + GEMINI_API_KEY
+    "https://generativelanguage.googleapis.com/v1/models/text-embedding-004:embedContent?key=" + getActiveApiKey(),
+    "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key=" + getActiveApiKey(),
+    "https://generativelanguage.googleapis.com/v1/models/embedding-001:embedContent?key=" + getActiveApiKey(),
+    "https://generativelanguage.googleapis.com/v1beta/models/embedding-001:embedContent?key=" + getActiveApiKey()
   ];
 
   const payload = JSON.stringify({
