@@ -1,46 +1,39 @@
-// ============================================================
-// CORE CONFIGURATION & SECRET RESOLVER
-// ============================================================
-
+// Gemini Configuration (Dynamic Discovery v15.0)
 const SCRIPT_PROPS = PropertiesService.getScriptProperties();
-let globalConfig = { apiKey: null, folderId: null };
+let globalConfig = { apiKey: null, folderId: null, activeModel: "gemini-1.5-flash", activeVersion: "v1beta" };
+
+// Model Matrix will be populated dynamically
+let DISCOVERED_MODELS = [];
 
 /**
- * Resolves the active configuration for the current request.
- * Prioritizes keys sent from the frontend over Script Properties.
+ * Resolves the active configuration and performs model discovery.
  */
 function resolveConfig(payload) {
   const p = payload || {};
   
-  // Sanitizer: Extract ID from URL if user pastes the whole thing
   const sanitize = (id) => {
     if (!id) return null;
-    let match = id.match(/[-\w]{25,}/); // Standard Google ID regex
+    let match = id.match(/[-\w]{25,}/); 
     return match ? match[0] : id.trim();
   };
 
-  const api = (p.apiKey && p.apiKey.trim()) || SCRIPT_PROPS.getProperty("GEMINI_API_KEY");
+  const api = (p.apiKey && p.apiKey !== "SET_IN_PROPERTIES") ? p.apiKey.trim() : SCRIPT_PROPS.getProperty("GEMINI_API_KEY");
   const folder = sanitize(p.folderId || SCRIPT_PROPS.getProperty("DRIVE_FOLDER_ID"));
   
-  globalConfig = {
-    apiKey: (api && api !== "SET_IN_PROPERTIES") ? api.trim() : null,
-    folderId: (folder && folder !== "SET_IN_PROPERTIES") ? folder : null
-  };
+  globalConfig.apiKey = (api && api !== "SET_IN_PROPERTIES") ? api : null;
+  globalConfig.folderId = (folder && folder !== "SET_IN_PROPERTIES") ? folder : null;
   
   return globalConfig;
 }
 
-// Accessor helpers (safer for V8)
 function getApiKey() { return globalConfig.apiKey; }
 function getFolderId() { return globalConfig.folderId; }
 
-// Gemini Model Matrix - Dynamic Fallback (Quantum Stable v14.5)
-const GEMINI_MODELS = [
+// Dynamic Fallback Matrix
+const FALLBACK_MODELS = [
   { id: "gemini-1.5-flash", version: "v1beta" },
   { id: "gemini-1.5-pro", version: "v1beta" },
   { id: "gemini-2.0-flash-exp", version: "v1beta" },
-  { id: "gemini-1.5-flash-8b", version: "v1beta" },
-  { id: "gemini-1.5-flash", version: "v1" },
   { id: "gemini-1.0-pro", version: "v1" }
 ];
 
@@ -273,18 +266,20 @@ function jsonResp(data) {
 
 function callGemini(contents, config = {}) {
   const apiKey = config.apiKey || getApiKey();
-  
-  if (!apiKey) {
-    Logger.log("ERROR: Attempted Gemini call with NO API Key.");
-    return null;
+  if (!apiKey) return null;
+
+  // 1. Sentinel Scan: If we haven't discovered models yet, do it now
+  if (DISCOVERED_MODELS.length === 0) {
+    autoDiscoverModels(apiKey);
   }
-  
+
   const temperature = config.temperature !== undefined ? config.temperature : 0.2;
   const maxOutputTokens = config.maxOutputTokens || 4096;
+  const activeModels = DISCOVERED_MODELS.length > 0 ? DISCOVERED_MODELS : FALLBACK_MODELS;
   
   let errors = [];
 
-  for (const model of GEMINI_MODELS) {
+  for (const model of activeModels) {
     try {
       const url = `https://generativelanguage.googleapis.com/${model.version}/models/${model.id}:generateContent?key=${apiKey}`;
       const res = UrlFetchApp.fetch(url, {
@@ -306,20 +301,51 @@ function callGemini(contents, config = {}) {
           return result.candidates[0].content.parts[0].text;
         }
       } else {
-        const err = `Gemini ${model.id} (${model.version}) - Error ${status}: ${responseText}`;
-        errors.push(err);
-        Logger.log(err);
+        errors.push(`[${model.id} ${model.version}] Status ${status}: ${responseText}`);
       }
     } catch (e) {
-      const err = `Fetch Error ${model.id}: ${e.message}`;
-      errors.push(err);
-      Logger.log(err);
+      errors.push(`[${model.id}] Fetch Fail: ${e.message}`);
     }
   }
   
-  // If we reach here, all failed
-  globalContextError = errors.join("\n---\n");
+  globalContextError = errors.join(" | ");
   return null;
+}
+
+function autoDiscoverModels(apiKey) {
+  const versions = ["v1beta", "v1"];
+  DISCOVERED_MODELS = [];
+
+  for (const v of versions) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/${v}/models?key=${apiKey}`;
+      const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+      if (res.getResponseCode() === 200) {
+        const data = JSON.parse(res.getContentText());
+        if (data.models) {
+          data.models.forEach(m => {
+            const id = m.name.split("/").pop();
+            if (m.supportedGenerationMethods.includes("generateContent") && !id.includes("vision")) {
+               DISCOVERED_MODELS.push({ id: id, version: v });
+            }
+          });
+        }
+      }
+    } catch (e) {}
+  }
+  
+  // Sort: Prioritize 1.5-flash, then 1.5-pro, then 2.0-flash, then 1.0-pro
+  DISCOVERED_MODELS.sort((a, b) => {
+    const score = (m) => {
+      if (m.id.includes("1.5-flash")) return 0;
+      if (m.id.includes("1.5-pro")) return 1;
+      if (m.id.includes("2.0-flash")) return 2;
+      return 3;
+    };
+    return score(a) - score(b);
+  });
+  
+  return DISCOVERED_MODELS;
 }
 
 let globalContextError = null;
@@ -398,14 +424,25 @@ function testConnectivity() {
     report.drive.error = e.message;
   }
 
-  // 2. Test Gemini
+  // 2. Test Gemini (Sentinel v15.0)
   try {
-    const res = callGemini([{ parts: [{ text: "ping" }] }], { temperature: 0, maxOutputTokens: 10 });
-    if (res) {
-      report.gemini.status = "✅ Connected (Response: " + res.substring(0, 10).trim() + ")";
+    const apiKey = getApiKey();
+    const discovered = autoDiscoverModels(apiKey);
+    
+    if (discovered.length > 0) {
+      report.gemini.status = `✅ Discovery Success! found ${discovered.length} active models.`;
+      const best = discovered[0];
+      const ping = callGemini([{ parts: [{ text: "ping" }] }], { temperature: 0, maxOutputTokens: 10 });
+      if (ping) {
+        report.gemini.status += ` Primary: ${best.id} (${best.version}) is LIVE.`;
+      } else {
+        report.gemini.status += " However, generateContent call failed.";
+        report.gemini.error = globalContextError;
+      }
     } else {
       report.gemini.status = "❌ Failed (Empty/No Models)";
-      report.gemini.error = globalContextError || "All models returned 404 or restricted access.";
+      report.gemini.error = "Google API returned 200 OK but NO generateContent models were found for this key. " +
+                            "Please ensure 'Generative Language API' is enabled in Google Cloud Console.";
     }
   } catch (e) {
     report.gemini.status = "❌ Critical Error";
