@@ -83,6 +83,10 @@ export async function testConnectivity() {
     return callBackend({ action: 'test_connectivity' });
 }
 
+export async function listAvailableModels() {
+    return callBackend({ action: 'list_available_models' });
+}
+
 // ============================================================
 // FOLDER OPERATIONS
 // ============================================================

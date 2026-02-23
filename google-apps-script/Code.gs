@@ -34,12 +34,14 @@ function resolveConfig(payload) {
 function getApiKey() { return globalConfig.apiKey; }
 function getFolderId() { return globalConfig.folderId; }
 
-// Gemini Model Matrix - Dynamic Fallback
+// Gemini Model Matrix - Dynamic Fallback (Quantum Stable v14.5)
 const GEMINI_MODELS = [
+  { id: "gemini-1.5-flash", version: "v1beta" },
+  { id: "gemini-1.5-pro", version: "v1beta" },
+  { id: "gemini-2.0-flash-exp", version: "v1beta" },
+  { id: "gemini-1.5-flash-8b", version: "v1beta" },
   { id: "gemini-1.5-flash", version: "v1" },
-  { id: "gemini-1.5-pro", version: "v1" },
-  { id: "gemini-1.5-flash-latest", version: "v1beta" },
-  { id: "gemini-1.5-pro-latest", version: "v1beta" }
+  { id: "gemini-1.0-pro", version: "v1" }
 ];
 
 // Optional: set manually if you already have a database spreadsheet
@@ -243,6 +245,7 @@ function routeAction(data) {
   switch (action) {
     case "init_db":             return initDB();
     case "test_connectivity":   return testConnectivity();
+    case "list_available_models": return listAvailableModelsAction();
     case "upload":              return uploadFile(data);
     case "list_documents":      return listDocuments(data);
     case "delete_document":     return deleteDocumentAction(data);
@@ -386,7 +389,9 @@ function testConnectivity() {
 
   // 1. Test Drive
   try {
-    const folder = DriveApp.getFolderById(getFolderId());
+    const fId = getFolderId();
+    if (!fId) throw new Error("Folder ID not set");
+    const folder = DriveApp.getFolderById(fId);
     report.drive.status = "✅ Connected (" + folder.getName() + ")";
   } catch (e) {
     report.drive.status = "❌ Failed";
@@ -399,11 +404,11 @@ function testConnectivity() {
     if (res) {
       report.gemini.status = "✅ Connected (Response: " + res.substring(0, 10).trim() + ")";
     } else {
-      report.gemini.status = "❌ Failed (Empty Response)";
-      report.gemini.error = globalContextError;
+      report.gemini.status = "❌ Failed (Empty/No Models)";
+      report.gemini.error = globalContextError || "All models returned 404 or restricted access.";
     }
   } catch (e) {
-    report.gemini.status = "❌ Failed";
+    report.gemini.status = "❌ Critical Error";
     report.gemini.error = e.message;
   }
 
@@ -419,6 +424,28 @@ function testConnectivity() {
   return jsonResp({ status: "success", diagnostics: report });
 }
 
+/**
+ * Lists all models available to the current API key (Debug tool)
+ */
+function listAvailableModelsAction() {
+  const apiKey = getApiKey();
+  if (!apiKey) return jsonResp({ error: "No API Key" });
+  
+  const results = {};
+  const versions = ["v1", "v1beta"];
+  
+  for (const v of versions) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/${v}/models?key=${apiKey}`;
+      const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+      results[v] = JSON.parse(res.getContentText());
+    } catch (e) {
+      results[v] = { error: e.message };
+    }
+  }
+  
+  return jsonResp({ status: "success", models: results });
+}
 
 function listFoldersAction() {
   const sheet = getSheet("Folders");

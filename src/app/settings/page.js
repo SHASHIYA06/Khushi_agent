@@ -8,9 +8,10 @@ import { getConfig, saveAllConfig } from '@/lib/config';
 import {
     HiOutlineCog, HiOutlineKey, HiOutlineCloud,
     HiOutlineCheck, HiOutlineExclamation, HiOutlineDatabase,
-    HiOutlineLightningBolt, HiOutlineRefresh, HiOutlineInformationCircle
+    HiOutlineLightningBolt, HiOutlineRefresh, HiOutlineInformationCircle,
+    HiOutlineSearchCircle
 } from 'react-icons/hi';
-import { testConnectivity, initDatabase } from '@/lib/api';
+import { testConnectivity, initDatabase, listAvailableModels } from '@/lib/api';
 
 const configFields = [
     {
@@ -57,10 +58,13 @@ export default function SettingsPage() {
         addNotification('All settings saved! ✓', 'success');
     }
 
+    const [availableModels, setAvailableModels] = useState(null);
+
     async function runDiagnostics() {
-        handleSaveAll();  // Save first
+        handleSaveAll();
         setTesting(true);
         setHealthStatus(null);
+        setAvailableModels(null);
         try {
             const res = await testConnectivity();
             setHealthStatus({ ok: true, diagnostics: res.diagnostics });
@@ -68,6 +72,18 @@ export default function SettingsPage() {
         } catch (e) {
             setHealthStatus({ ok: false, error: e.message });
             addNotification('Diagnostics failed: ' + e.message, 'error');
+        }
+        setTesting(false);
+    }
+
+    async function handleViewModels() {
+        setTesting(true);
+        try {
+            const res = await listAvailableModels();
+            setAvailableModels(res.models);
+            addNotification('Model list retrieved!', 'success');
+        } catch (e) {
+            addNotification('Could not list models: ' + e.message, 'error');
         }
         setTesting(false);
     }
@@ -133,6 +149,23 @@ export default function SettingsPage() {
                                         </div>
                                     </div>
                                 ))}
+
+                                <div className="mt-4 flex gap-2">
+                                    <button
+                                        onClick={handleViewModels}
+                                        className="btn-secondary text-xs py-1"
+                                        disabled={testing}
+                                    >
+                                        <HiOutlineSearchCircle className="mr-1" /> View Available Models
+                                    </button>
+                                </div>
+
+                                {availableModels && (
+                                    <div className="mt-4 p-3 rounded-lg bg-black/40 text-[10px] overflow-auto max-h-[200px] font-mono border border-white/5">
+                                        <p className="mb-2 text-blue-400 font-bold">Authorized Models for your Key:</p>
+                                        <pre>{JSON.stringify(availableModels, null, 2)}</pre>
+                                    </div>
+                                )}
                             </div>
                         ) : (
                             <div className="flex items-center gap-3">
