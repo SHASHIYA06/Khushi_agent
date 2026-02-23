@@ -16,8 +16,10 @@ import useStore from '@/store/useStore';
 import { queryRAG } from '@/lib/api';
 import {
     HiOutlineSearch, HiOutlineLightningBolt, HiOutlineCode,
-    HiOutlineDocumentText, HiOutlineChip, HiOutlineFilter
+    HiOutlineDocumentText, HiOutlineChip, HiOutlineFilter,
+    HiOutlineShieldCheck, HiOutlineExclamation
 } from 'react-icons/hi';
+import { logQA } from '@/lib/supabase';
 
 // Component type colors for diagram nodes
 const COMPONENT_COLORS = {
@@ -73,6 +75,13 @@ export default function QueryPage() {
             });
             setQueryResult(result);
             addNotification('Matrix Intelligence Query completed', 'success');
+
+            // PRD 4.4: Audit Logging
+            try {
+                await logQA(query, result.answer, result.router?.agent || 'DOCUMENT_QA', result.matches);
+            } catch (supaErr) {
+                console.warn('[MetroCircuit] Audit log failed (Supabase offline):', supaErr);
+            }
 
             // Build diagram from matches
             if (result.matches) {
@@ -293,13 +302,23 @@ export default function QueryPage() {
                 {/* Results */}
                 {queryResult && (
                     <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
-                        <div className="flex items-center gap-3 mb-4">
+                        <div className="flex flex-wrap items-center gap-3 mb-4">
                             <div className="status-badge success px-3 py-1 flex items-center gap-2">
                                 <span className="w-2 h-2 rounded-full animate-pulse bg-emerald-400" />
-                                Matrix Intelligence: {queryResult.searchMode === 'hybrid' ? 'Neural + Semantic' : 'Keyword Only'}
+                                Agent: {queryResult.router?.agent || 'DOCUMENT_QA'}
                             </div>
+
+                            {/* Confidence Score PRD 4.6 */}
+                            <div className={`status-badge px-3 py-1 flex items-center gap-2 ${queryResult.matchCount > 0 ? 'info' : 'warning'}`}>
+                                {queryResult.matchCount > 0 ? (
+                                    <><HiOutlineShieldCheck size={14} className="text-blue-400" /> Confidence: High</>
+                                ) : (
+                                    <><HiOutlineExclamation size={14} className="text-amber-400" /> Confidence: Inferential</>
+                                )}
+                            </div>
+
                             <div className="text-xs opacity-40">
-                                Matches: {queryResult.matchCount} | Agents: Active
+                                Mode: {queryResult.searchMode === 'hybrid' ? 'Neural' : 'Keyword'} | Top Similarity: {queryResult.matches?.[0]?.similarity ? (queryResult.matches[0].similarity * 100).toFixed(0) + '%' : 'N/A'}
                             </div>
                         </div>
                         {/* Output tabs */}

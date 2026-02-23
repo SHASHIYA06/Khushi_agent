@@ -1809,19 +1809,22 @@ function generateAnswer(query, context, outputType) {
     prompt = "You are an electrical engineering data extractor. Based ONLY on the context, answer as JSON: " +
       '{"summary":"","components":[],"connections":[{"from":"","to":"","cable_id":"","specs":"","description":""}],"voltage_levels":[],"panel_info":"","notes"}. ' +
       "Be 100% precise with cable IDs and connection paths. If info is missing, say 'DATA_MISSING'.";
-  } else if (outputType === "schematic") {
-    prompt = "You are a Forensic Electrical Schematic Expert. Your goal is to generate a 100% accurate mathematical graph for React Flow.\n\n" +
+  } else  if (outputType === "schematic") {
+    prompt = "You are a Forensic Electrical Schematic Expert. Your goal is to generate a 100% accurate graph for a circuit diagram.\n" +
       "RULES:\n" +
-      "1. Extract EVERY component ID (e.g. MCCB-01, W-102).\n" +
-      "2. For connections, identifying the EXACT 'from' and 'to' is mandatory. If a cable links them, put the CABLE ID in the label.\n" +
-      "3. Use standard electrical node types: BREAKER, BUSBAR, PANEL, TRANSFORMER, MOTOR, SOURCE, LOAD.\n" +
-      "4. Return ONLY valid JSON: " +
-      '{"components":[{"id":"uid","type":"TYPE","label":"NAME"}],"connections":[{"from":"ID1","to":"ID2","label":"CABLE/SPECS"}]}\n\n' +
+      "1. Use EXACT IDs from the context (e.g., CP-01, W102).\n" +
+      "2. When generating PIN DIAGRAMS, list all terminals and their functions as labels on the connections.\n" +
+      "3. For DIMENSION queries, include measurements directly in the node labels or edge descriptions.\n" +
+      "4. Generate React Flow JSON:\n" +
+      '{"components":[{"id":"uid","type":"TYPE","label":"NAME"}],"connections":[{"from":"ID1","to":"ID2","label":"CABLE/PIN"}]}\n\n' +
       "CONTEXT:\n" + context.substring(0, 10000);
   } else {
     prompt = "You are a Senior Metro Project Manager and Chief Electrical Auditor. Answer the query based ONLY on the context.\n" +
-      "Use professional, engineering-grade terminology. Be precise with units and IDs.\n" +
-      "Format: A professional technical summary followed by bulleted evidence with citations [Source X, Page Y].";
+      "SPECIAL AGENT GUIDELINES:\n" +
+      "- If PINOUTS are requested, provide a table of terminal numbers and functions.\n" +
+      "- If DIMENSIONS are requested, provide specific cutout sizes, clearances, and units (mm/m).\n" +
+      "- If CONSISTENCY is requested (Excel vs Drawing), explicitly point out mismatches.\n" +
+      "Format: Professional summary with citations [Source X, Page Y].";
   }
 
   prompt += "\n\nCONTEXT:\n" + context.substring(0, 12000) + "\n\nQUERY:\n" + query;
@@ -1840,14 +1843,15 @@ function generateAnswer(query, context, outputType) {
   return result;
 }
 
-// ── Multi-Agent Router ──
+// ── Multi-Agent Coordinator (v16.0) ──
 function agentRouter(query) {
-  const prompt = "Analyze this Metro Infrastructure query. Intents:\n" +
-    "1. TEXT_ANSWER: General info\n" +
-    "2. CABLE_DETAILS: Specific wire/cable specs/counts\n" +
-    "3. SCHEMATIC: Generate electrical diagram JSON\n" +
-    "4. VOICE_DISCOVERY: Spoken-style natural query\n\n" +
-    "Return JSON: {\"intent\":\"...\", \"expandedKeywords\":[\"synonyms\",\"units\"], \"outputFormat\":\"text|json|schematic\"}\n\n" +
+  const prompt = "You are the Coordinator Agent for Metro Infrastructure. Classify the query into one of these specialized agents:\n" +
+    "1. DOCUMENT_QA: General documentation, manuals, installation guides.\n" +
+    "2. CIRCUIT_EXPERT: Specialized in PIN DIAGRAMS, CABLE SCHEDULES, and SCHEMATICS. Focus on equipment tags (e.g., CP-01, W2).\n" +
+    "3. DIMENSION_AUDITOR: Specialized in equipment physical dimensions, panel cutouts, and layout clearances.\n" +
+    "4. EXCEL_ANALYST: Tabular BOM analysis, consistency checks between different sheets, calculations.\n" +
+    "5. VOICE_DISCOVERY: Conversational natural language discovery.\n\n" +
+    "Return JSON: {\"intent\":\"...\", \"agent\":\"...\", \"expandedKeywords\":[], \"outputFormat\":\"text|json|schematic\", \"requiresVision\": true/false}\n\n" +
     "Query: " + query;
     
   try {
@@ -1857,17 +1861,18 @@ function agentRouter(query) {
       let parsed = JSON.parse(cleaned);
       
       parsed.expandedKeywords = parsed.expandedKeywords || [];
-      if (parsed.intent === "CABLE_DETAILS") {
-        parsed.expandedKeywords = [...new Set([...parsed.expandedKeywords, "core", "sqmm", "wire", "cable", "armor", "screen", "rating", "current", "conductor"])];
-      } else if (parsed.intent === "SCHEMATIC") {
-        parsed.expandedKeywords = [...new Set([...parsed.expandedKeywords, "SLD", "drawing", "circuit", "connection", "feeder", "breaker", "busbar", "interconnect", "schematic", "line diagram"])];
+      // Dynamic Keyword Expansion based on Agent
+      if (parsed.agent === "CIRCUIT_EXPERT") {
+        parsed.expandedKeywords = [...new Set([...parsed.expandedKeywords, "pin", "wiring", "terminal", "connection", "cable", "conductor", "schematic", "drawing", "circuit"])];
+      } else if (parsed.agent === "DIMENSION_AUDITOR") {
+        parsed.expandedKeywords = [...new Set([...parsed.expandedKeywords, "dimension", "size", "cutout", "mm", "meter", "clearance", "layout", "drawing", "view"])];
       }
       return parsed;
     }
   } catch (e) {
-    Logger.log("Router failed: " + e.message);
+    Logger.log("Coordinator failed: " + e.message);
   }
-  return { intent: "TEXT_ANSWER", expandedKeywords: [], outputFormat: "text" };
+  return { intent: "TEXT_ANSWER", agent: "DOCUMENT_QA", expandedKeywords: [], outputFormat: "text" };
 }
 
 // ── Multi-Agent Expert Verification (The "100% Match" Engine) ──

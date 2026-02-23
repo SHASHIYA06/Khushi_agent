@@ -10,8 +10,9 @@ import {
     HiOutlineFolder, HiOutlineFolderAdd, HiOutlineDocumentText,
     HiOutlineTrash, HiOutlineUpload, HiOutlineX, HiOutlineEye,
     HiOutlineRefresh, HiOutlineDocumentAdd, HiOutlineExclamationCircle,
-    HiOutlineLightningBolt
+    HiOutlineLightningBolt, HiOutlineSearchCircle
 } from 'react-icons/hi';
+import { openDrivePicker } from '@/lib/googleDrive';
 
 export default function DocumentsPage() {
     const { folders, setFolders, documents, setDocuments, addNotification, selectedFolder, setSelectedFolder } = useStore();
@@ -100,6 +101,22 @@ export default function DocumentsPage() {
         }
     }
 
+    async function handleAddFromDrive() {
+        try {
+            await openDrivePicker(async (items) => {
+                console.log('[MetroCircuit] Drive Picker items:', items);
+                addNotification(`Selected ${items.length} items. Syncing...`, 'info');
+                setSyncing(true);
+                await syncDrive();
+                await loadData();
+                setSyncing(false);
+                addNotification('Drive sync complete!', 'success');
+            });
+        } catch (e) {
+            addNotification('Picker error: ' + e.message, 'error');
+        }
+    }
+
     async function handleDeleteDoc(doc) {
         if (!confirm('Delete this document?')) return;
         try {
@@ -159,6 +176,13 @@ export default function DocumentsPage() {
                         </p>
                     </div>
                     <div className="flex items-center gap-2">
+                        <button
+                            onClick={handleAddFromDrive}
+                            className="btn-primary"
+                        >
+                            <HiOutlineSearchCircle size={16} />
+                            Add from Drive
+                        </button>
                         <button
                             onClick={async () => {
                                 setSyncing(true);

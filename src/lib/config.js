@@ -9,6 +9,9 @@ const CONFIG_KEYS = {
   GOOGLE_SCRIPT_URL: 'metro_google_script_url',
   GEMINI_API_KEY: 'metro_gemini_api_key',
   DRIVE_FOLDER_ID: 'metro_drive_folder_id',
+  GOOGLE_CLIENT_ID: 'metro_google_client_id',
+  SUPABASE_URL: 'metro_supabase_url',
+  SUPABASE_ANON_KEY: 'metro_supabase_anon_key',
 };
 
 export function getConfig() {
@@ -24,6 +27,9 @@ export function getConfig() {
     GOOGLE_SCRIPT_URL: localStorage.getItem(CONFIG_KEYS.GOOGLE_SCRIPT_URL) || process.env.NEXT_PUBLIC_GOOGLE_SCRIPT_URL || '',
     GEMINI_API_KEY: localStorage.getItem(CONFIG_KEYS.GEMINI_API_KEY) || '',
     DRIVE_FOLDER_ID: localStorage.getItem(CONFIG_KEYS.DRIVE_FOLDER_ID) || '',
+    GOOGLE_CLIENT_ID: localStorage.getItem(CONFIG_KEYS.GOOGLE_CLIENT_ID) || '',
+    SUPABASE_URL: localStorage.getItem(CONFIG_KEYS.SUPABASE_URL) || '',
+    SUPABASE_ANON_KEY: localStorage.getItem(CONFIG_KEYS.SUPABASE_ANON_KEY) || '',
   };
 }
 

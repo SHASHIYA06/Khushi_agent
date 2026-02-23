@@ -19,8 +19,9 @@ import { queryRAG } from '@/lib/api';
 import {
     HiOutlineChip, HiOutlineLightningBolt, HiOutlineRefresh,
     HiOutlineZoomIn, HiOutlineDownload, HiOutlineSearch,
-    HiOutlineAdjustments
+    HiOutlineAdjustments, HiOutlineShieldCheck
 } from 'react-icons/hi';
+import { saveArtifact } from '@/lib/supabase';
 
 // ── Component colors ──
 const COMPONENT_COLORS = {
@@ -211,9 +212,32 @@ export default function DiagramPage() {
         setLoading(false);
     }
 
-    // Export as PNG screenshot
-    function handleExport() {
-        addNotification('Use browser screenshot (Cmd+Shift+4) to capture diagram', 'info');
+    // Export and Save to Supabase (PRD 4.7 / 4.9)
+    async function handleExport() {
+        if (nodes.length === 0) return;
+        setLoading(true);
+        try {
+            const diagramData = {
+                title: diagramTitle,
+                nodes,
+                edges,
+                metadata: {
+                    componentCount,
+                    connectionCount,
+                    timestamp: new Date().toISOString()
+                }
+            };
+
+            const blob = new Blob([JSON.stringify(diagramData, null, 2)], { type: 'application/json' });
+            const result = await saveArtifact('diagram', `${diagramTitle.replace(/\s+/g, '_')}.json`, blob);
+
+            if (result) {
+                addNotification('Diagram saved to Supabase Vault!', 'success');
+            }
+        } catch (e) {
+            addNotification('Save failed: ' + e.message, 'error');
+        }
+        setLoading(false);
     }
 
     const legendItems = Object.entries(COMPONENT_COLORS).filter(([k]) => k !== 'DEFAULT').slice(0, 10);
@@ -236,8 +260,9 @@ export default function DiagramPage() {
                         <button onClick={() => setShowLegend(!showLegend)} className="btn-secondary text-sm">
                             <HiOutlineAdjustments size={16} /> Legend
                         </button>
-                        <button onClick={handleExport} className="btn-secondary text-sm">
-                            <HiOutlineDownload size={16} /> Export
+                        <button onClick={handleExport} className="btn-primary text-sm" disabled={loading || nodes.length === 0}>
+                            {loading ? <HiOutlineRefresh className="animate-spin" /> : <HiOutlineShieldCheck size={16} />}
+                            Save to Vault
                         </button>
                     </div>
                 </div>
