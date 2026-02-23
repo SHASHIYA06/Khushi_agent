@@ -79,6 +79,10 @@ export async function checkBackendHealth() {
     return callBackend({ action: 'health' });
 }
 
+export async function testConnectivity() {
+    return callBackend({ action: 'test_connectivity' });
+}
+
 // ============================================================
 // FOLDER OPERATIONS
 // ============================================================

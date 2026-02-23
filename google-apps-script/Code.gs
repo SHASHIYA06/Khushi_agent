@@ -11,28 +11,35 @@ let globalConfig = { apiKey: null, folderId: null };
  */
 function resolveConfig(payload) {
   const p = payload || {};
-  const api = p.apiKey || SCRIPT_PROPS.getProperty("GEMINI_API_KEY");
-  const folder = p.folderId || SCRIPT_PROPS.getProperty("DRIVE_FOLDER_ID");
+  
+  // Sanitizer: Extract ID from URL if user pastes the whole thing
+  const sanitize = (id) => {
+    if (!id) return null;
+    let match = id.match(/[-\w]{25,}/); // Standard Google ID regex
+    return match ? match[0] : id.trim();
+  };
+
+  const api = (p.apiKey && p.apiKey.trim()) || SCRIPT_PROPS.getProperty("GEMINI_API_KEY");
+  const folder = sanitize(p.folderId || SCRIPT_PROPS.getProperty("DRIVE_FOLDER_ID"));
   
   globalConfig = {
-    apiKey: (api && api !== "SET_IN_PROPERTIES") ? api : null,
+    apiKey: (api && api !== "SET_IN_PROPERTIES") ? api.trim() : null,
     folderId: (folder && folder !== "SET_IN_PROPERTIES") ? folder : null
   };
   
   return globalConfig;
 }
 
-// Accessor helpers (always use these)
-const getApiKey = () => globalConfig.apiKey;
-const getFolderId = () => globalConfig.folderId;
+// Accessor helpers (safer for V8)
+function getApiKey() { return globalConfig.apiKey; }
+function getFolderId() { return globalConfig.folderId; }
 
 // Gemini Model Matrix - Dynamic Fallback
 const GEMINI_MODELS = [
   { id: "gemini-1.5-flash", version: "v1" },
-  { id: "gemini-1.5-flash-latest", version: "v1beta" },
   { id: "gemini-1.5-pro", version: "v1" },
-  { id: "gemini-1.5-pro-latest", version: "v1beta" },
-  { id: "gemini-2.0-flash-exp", version: "v1beta" }
+  { id: "gemini-1.5-flash-latest", version: "v1beta" },
+  { id: "gemini-1.5-pro-latest", version: "v1beta" }
 ];
 
 // Optional: set manually if you already have a database spreadsheet
@@ -91,12 +98,15 @@ function getDB() {
 
   // Move to Drive folder if possible
   try {
-    const file = DriveApp.getFileById(ss.getId());
-    const folder = DriveApp.getFolderById(getFolderId());
-    folder.addFile(file);
-    DriveApp.getRootFolder().removeFile(file);
+    const fId = getFolderId();
+    if (fId) {
+      const file = DriveApp.getFileById(ss.getId());
+      const folder = DriveApp.getFolderById(fId);
+      folder.addFile(file);
+      DriveApp.getRootFolder().removeFile(file);
+    }
   } catch (e) {
-    Logger.log("Could not move DB to folder: " + e.message);
+    Logger.log("Could not move DB to folder (will keep in Root): " + e.message);
   }
 
   // Create tabs with headers
@@ -191,29 +201,40 @@ function routeAction(data) {
   const action = data.action;
   const config = resolveConfig(data);
   
-  // Health/Setup check
-  if (action === "health") {
-    let apiStatus = "❌ Missing";
-    let folderStatus = "❌ Missing";
-    if (config.apiKey) apiStatus = "✅ Found";
+  // DIAGNOSTIC WIZARD (v12.0)
+  if (action === "health" || action === "diagnostics") {
+    let report = {
+      status: "online",
+      version: "12.0",
+      checks: { api: "❌ Missing", folder: "❌ Missing", drive_api: "✅ Enabled", db: "❌ Not Ready" }
+    };
+    
+    if (config.apiKey) report.checks.api = "✅ Configured";
+    
     if (config.folderId) {
-       try { DriveApp.getFolderById(config.folderId); folderStatus = "✅ Accessible"; }
-       catch(e) { folderStatus = "❌ Invalid ID or Permission Denied"; }
+       try { 
+         const f = DriveApp.getFolderById(config.folderId); 
+         report.checks.folder = "✅ Accessible (" + f.getName() + ")";
+       } catch(e) { 
+         report.checks.folder = "❌ Error: " + e.message; 
+       }
+    }
+    
+    try {
+      const db = getDB();
+      if (db) report.checks.db = "✅ Ready (" + db.getId() + ")";
+    } catch(e) {
+      report.checks.db = "❌ Failed: " + e.message;
     }
 
-    return jsonResp({
-      status: "online",
-      version: "11.0",
-      config: { api: apiStatus, folder: folderStatus },
-      db_ready: !!SCRIPT_PROPS.getProperty("DB_SPREADSHEET_ID")
-    });
+    return jsonResp(report);
   }
 
   // CONFIG GUARD
   if (!config.apiKey || !config.folderId) {
     return jsonResp({ 
       error: "MISSING_CONFIGURATION", 
-      message: "Please configure GEMINI_API_KEY and DRIVE_FOLDER_ID in App Settings or Script Properties." 
+      message: "Backend is not fully configured. Please provide GEMINI_API_KEY and DRIVE_FOLDER_ID." 
     });
   }
 
@@ -221,6 +242,7 @@ function routeAction(data) {
 
   switch (action) {
     case "init_db":             return initDB();
+    case "test_connectivity":   return testConnectivity();
     case "upload":              return uploadFile(data);
     case "list_documents":      return listDocuments(data);
     case "delete_document":     return deleteDocumentAction(data);
@@ -354,6 +376,49 @@ function deleteFolderAction(data) {
 
   return jsonResp({ status: "deleted" });
 }
+
+function testConnectivity() {
+  const report = {
+    gemini: { status: "Pending", error: null },
+    drive: { status: "Pending", error: null },
+    database: { status: "Pending", error: null }
+  };
+
+  // 1. Test Drive
+  try {
+    const folder = DriveApp.getFolderById(getFolderId());
+    report.drive.status = "✅ Connected (" + folder.getName() + ")";
+  } catch (e) {
+    report.drive.status = "❌ Failed";
+    report.drive.error = e.message;
+  }
+
+  // 2. Test Gemini
+  try {
+    const res = callGemini([{ parts: [{ text: "ping" }] }], { temperature: 0, maxOutputTokens: 10 });
+    if (res) {
+      report.gemini.status = "✅ Connected (Response: " + res.substring(0, 10).trim() + ")";
+    } else {
+      report.gemini.status = "❌ Failed (Empty Response)";
+      report.gemini.error = globalContextError;
+    }
+  } catch (e) {
+    report.gemini.status = "❌ Failed";
+    report.gemini.error = e.message;
+  }
+
+  // 3. Test DB
+  try {
+    const db = getDB();
+    report.database.status = "✅ Connected (" + db.getName() + ")";
+  } catch (e) {
+    report.database.status = "❌ Failed";
+    report.database.error = e.message;
+  }
+
+  return jsonResp({ status: "success", diagnostics: report });
+}
+
 
 function listFoldersAction() {
   const sheet = getSheet("Folders");
@@ -977,47 +1042,68 @@ function deleteDocumentAction(data) {
 
 function syncDriveFiles() {
   try {
-    const folderId = getFolderId();
-    if (!folderId) return jsonResp({ error: "Missing Folder ID" });
+    const rootFolderId = getFolderId();
+    if (!rootFolderId) return jsonResp({ error: "Missing Root Folder ID" });
 
-    const synced = [];
+    const syncedFiles = [];
+    const syncedFolders = [];
+    
     const docSheet = getSheet("Documents");
-    const docData = docSheet.getDataRange().getValues();
-    const existingIds = new Set(docData.slice(1).map(r => String(r[3])));
-    const dbId = PropertiesService.getScriptProperties().getProperty("DB_SPREADSHEET_ID") || "";
+    const folderSheet = getSheet("Folders");
+    
+    const existingDocIds = new Set(docSheet.getDataRange().getValues().slice(1).map(r => String(r[3])));
+    const existingFolderIds = new Set(folderSheet.getDataRange().getValues().slice(1).map(r => String(r[0])));
+    const dbId = SCRIPT_PROPS.getProperty("DB_SPREADSHEET_ID") || "";
 
-    // ── Recursive Sync Implementation ──
-    const processFolder = (folder) => {
+    // Recursive Walker
+    function crawl(folder, parentAppFolderId) {
+      // 1. Register this folder if not root
+      let currentAppFolderId = parentAppFolderId;
+      const fId = folder.getId();
+      
+      if (fId !== rootFolderId && !existingFolderIds.has(fId)) {
+        folderSheet.appendRow([fId, folder.getName(), "Auto-synced from Drive", new Date().toISOString()]);
+        syncedFolders.push(folder.getName());
+        currentAppFolderId = fId;
+      } else if (existingFolderIds.has(fId)) {
+        currentAppFolderId = fId;
+      }
+
+      // 2. Process Files
       const files = folder.getFiles();
       while (files.hasNext()) {
         const file = files.next();
-        const fId = file.getId();
-        if (existingIds.has(fId) || fId === dbId) continue;
+        const fileId = file.getId();
+        if (existingDocIds.has(fileId) || fileId === dbId) continue;
         if (file.getMimeType() === "application/vnd.google-apps.form") continue;
 
         const docId = Utilities.getUuid();
         docSheet.appendRow([
-          docId, file.getName(), folder.getId(), fId,
+          docId, file.getName(), currentAppFolderId || "", fileId,
           file.getMimeType(), "uploaded", 0, new Date().toISOString()
         ]);
-        synced.push({ name: file.getName(), id: docId });
+        syncedFiles.push(file.getName());
       }
-      
+
+      // 3. Process Subfolders
       const subfolders = folder.getFolders();
       while (subfolders.hasNext()) {
-        processFolder(subfolders.next());
+        crawl(subfolders.next(), currentAppFolderId);
       }
-    };
-
-    try {
-      processFolder(DriveApp.getFolderById(folderId));
-    } catch (e) {
-      return jsonResp({ error: "Drive Access Denied: " + e.message });
     }
 
-    return jsonResp({ status: "synced", newFiles: synced.length, files: synced });
+    const rootFolder = DriveApp.getFolderById(rootFolderId);
+    crawl(rootFolder, "");
+
+    return jsonResp({ 
+      status: "synced", 
+      newFiles: syncedFiles.length, 
+      newFolders: syncedFolders.length,
+      message: `Found ${syncedFiles.length} new files and ${syncedFolders.length} new folders.`
+    });
   } catch (err) {
-    return jsonResp({ error: "Sync failed: " + err.message });
+    Logger.log("Deep Sync Failed: " + err.message);
+    return jsonResp({ error: "Deep Sync failed: " + err.message });
   }
 }
 

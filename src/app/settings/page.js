@@ -5,12 +5,12 @@ import { motion } from 'framer-motion';
 import AppShell from '@/components/layout/AppShell';
 import useStore from '@/store/useStore';
 import { getConfig, saveAllConfig } from '@/lib/config';
-import { checkBackendHealth, initDatabase } from '@/lib/api';
 import {
     HiOutlineCog, HiOutlineKey, HiOutlineCloud,
     HiOutlineCheck, HiOutlineExclamation, HiOutlineDatabase,
-    HiOutlineLightningBolt, HiOutlineRefresh
+    HiOutlineLightningBolt, HiOutlineRefresh, HiOutlineInformationCircle
 } from 'react-icons/hi';
+import { testConnectivity, initDatabase } from '@/lib/api';
 
 const configFields = [
     {
@@ -57,17 +57,17 @@ export default function SettingsPage() {
         addNotification('All settings saved! ✓', 'success');
     }
 
-    async function testConnection() {
+    async function runDiagnostics() {
         handleSaveAll();  // Save first
         setTesting(true);
         setHealthStatus(null);
         try {
-            const res = await checkBackendHealth();
-            setHealthStatus({ ok: true, data: res });
-            addNotification('Backend connected! v' + (res.version || '?'), 'success');
+            const res = await testConnectivity();
+            setHealthStatus({ ok: true, diagnostics: res.diagnostics });
+            addNotification('Diagnostics complete!', 'success');
         } catch (e) {
             setHealthStatus({ ok: false, error: e.message });
-            addNotification('Connection failed: ' + e.message, 'error');
+            addNotification('Diagnostics failed: ' + e.message, 'error');
         }
         setTesting(false);
     }
@@ -99,9 +99,9 @@ export default function SettingsPage() {
                         </p>
                     </div>
                     <div className="flex gap-2">
-                        <button onClick={testConnection} className="btn-secondary" disabled={testing}>
+                        <button onClick={runDiagnostics} className="btn-secondary" disabled={testing}>
                             <HiOutlineRefresh size={16} className={testing ? 'animate-spin' : ''} />
-                            {testing ? 'Testing...' : 'Test Connection'}
+                            {testing ? 'Probing...' : 'Run Diagnostics'}
                         </button>
                         <button onClick={handleSaveAll} className="btn-primary">
                             <HiOutlineCheck size={16} /> Save All
@@ -114,23 +114,31 @@ export default function SettingsPage() {
                     <motion.div
                         initial={{ opacity: 0, y: -10 }}
                         animate={{ opacity: 1, y: 0 }}
-                        className="glass-card p-4 mb-6 max-w-3xl"
-                        style={{ borderLeft: healthStatus.ok ? '3px solid var(--accent-emerald)' : '3px solid var(--accent-rose)' }}
+                        className="glass-card p-6 mb-6 max-w-3xl"
                     >
+                        <h3 className="text-sm font-bold mb-4 flex items-center gap-2" style={{ color: 'var(--text-primary)' }}>
+                            <HiOutlineInformationCircle style={{ color: 'var(--accent-blue)' }} /> Connectivity Diagnostics
+                        </h3>
+
                         {healthStatus.ok ? (
-                            <div className="flex items-center gap-3">
-                                <HiOutlineCheck size={20} style={{ color: 'var(--accent-emerald)' }} />
-                                <div>
-                                    <p className="font-semibold text-sm" style={{ color: 'var(--accent-emerald)' }}>
-                                        ✅ Connected! Backend v{healthStatus.data?.version || '3.0'} — Database: {healthStatus.data?.db || 'Google Sheets'}
-                                    </p>
-                                </div>
+                            <div className="space-y-4">
+                                {Object.entries(healthStatus.diagnostics).map(([key, info]) => (
+                                    <div key={key} className="flex items-start justify-between border-b border-white/5 pb-2">
+                                        <div>
+                                            <p className="text-xs font-bold uppercase" style={{ color: 'var(--text-secondary)' }}>{key}</p>
+                                            <p className="text-sm" style={{ color: info.status.includes('✅') ? 'var(--accent-emerald)' : 'var(--accent-rose)' }}>
+                                                {info.status}
+                                            </p>
+                                            {info.error && <p className="text-[10px] mt-1 opacity-50 text-rose-400">{info.error}</p>}
+                                        </div>
+                                    </div>
+                                ))}
                             </div>
                         ) : (
                             <div className="flex items-center gap-3">
                                 <HiOutlineExclamation size={20} style={{ color: 'var(--accent-rose)' }} />
                                 <div>
-                                    <p className="font-semibold text-sm" style={{ color: 'var(--accent-rose)' }}>❌ Connection Failed</p>
+                                    <p className="font-semibold text-sm" style={{ color: 'var(--accent-rose)' }}>Communication Interface Offline</p>
                                     <p className="text-xs" style={{ color: 'var(--text-secondary)' }}>{healthStatus.error}</p>
                                 </div>
                             </div>
