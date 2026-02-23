@@ -57,7 +57,8 @@ export default function DocumentsPage() {
             // Fetch documents
             let fetchedDocs = [];
             try {
-                const dRes = await listDocuments(selectedFolder?.id || null);
+                // ALWAYS fetch all documents on load/sync to ensure counts are accurate
+                const dRes = await listDocuments(null);
                 console.log('[MetroCircuit] Documents response:', dRes);
                 fetchedDocs = dRes.documents || dRes || [];
                 if (!Array.isArray(fetchedDocs)) fetchedDocs = [];
@@ -160,8 +161,11 @@ export default function DocumentsPage() {
     });
 
     const filteredDocs = selectedFolder
-        ? documents.filter(d => d.folder_id === selectedFolder.id)
+        ? documents.filter(d => String(d.folder_id) === String(selectedFolder.id))
         : documents;
+
+    // Count for "All Documents" card (everything)
+    const totalFileCount = documents.length;
 
     return (
         <AppShell>
@@ -264,7 +268,7 @@ export default function DocumentsPage() {
                         >
                             <HiOutlineDocumentText size={28} className="mx-auto mb-2" style={{ color: 'var(--accent-blue)' }} />
                             <p className="text-sm font-medium">All Documents</p>
-                            <p className="text-xs mt-1" style={{ color: 'var(--text-secondary)' }}>{documents.length} files</p>
+                            <p className="text-xs mt-1" style={{ color: 'var(--text-secondary)' }}>{totalFileCount} files</p>
                         </motion.div>
 
                         {folders.map((f) => (
@@ -285,7 +289,7 @@ export default function DocumentsPage() {
                                 <HiOutlineFolder size={28} className="mx-auto mb-2" style={{ color: 'var(--accent-purple)' }} />
                                 <p className="text-sm font-medium truncate">{f.name}</p>
                                 <p className="text-xs mt-1" style={{ color: 'var(--text-secondary)' }}>
-                                    {documents.filter(d => d.folder_id === f.id).length} files
+                                    {documents.filter(d => String(d.folder_id) === String(f.id)).length} files
                                 </p>
                             </motion.div>
                         ))}

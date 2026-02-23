@@ -486,9 +486,16 @@ function listAvailableModelsAction() {
 
 function listFoldersAction() {
   const sheet = getSheet("Folders");
-  const data = sheet.getDataRange().getValues();
-  const folders = [];
+  let data = sheet.getDataRange().getValues();
+  
+  // AUTO-HEAL: If no folders exist in DB but they might be in Drive, or to keep fresh
+  if (data.length <= 1) {
+    Logger.log("DB Folders empty, triggering sync_drive auto-heal...");
+    syncDriveFiles();
+    data = sheet.getDataRange().getValues(); // Re-read after sync
+  }
 
+  const folders = [];
   for (let i = 1; i < data.length; i++) {
     folders.push({
       id: data[i][0],
@@ -496,12 +503,6 @@ function listFoldersAction() {
       description: data[i][2],
       created_at: data[i][3]
     });
-  }
-
-  // AUTO-HEAL: If no folders exist in DB but they might be in Drive, or to keep fresh
-  if (folders.length === 0) {
-    Logger.log("DB Folders empty, triggering sync_drive auto-heal...");
-    syncDriveFiles();
   }
 
   folders.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
@@ -1104,13 +1105,14 @@ function deleteDocumentAction(data) {
 // DRIVE SYNC
 // ============================================================
 
+// Matrix v17.0 'Hyper-Sync' Implementation
 function syncDriveFiles() {
   try {
     const rootFolderId = getFolderId();
     if (!rootFolderId) return jsonResp({ error: "Missing Root Folder ID" });
 
-    const syncedFiles = [];
-    const syncedFolders = [];
+    const newDocRows = [];
+    const newFolderRows = [];
     
     const docSheet = getSheet("Documents");
     const folderSheet = getSheet("Folders");
@@ -1119,55 +1121,64 @@ function syncDriveFiles() {
     const existingFolderIds = new Set(folderSheet.getDataRange().getValues().slice(1).map(r => String(r[0])));
     const dbId = SCRIPT_PROPS.getProperty("DB_SPREADSHEET_ID") || "";
 
-    // Recursive Walker
-    function crawl(folder, parentAppFolderId) {
-      // 1. Register this folder if not root
-      let currentAppFolderId = parentAppFolderId;
+    function crawl(folder, parentId) {
       const fId = folder.getId();
-      
+      let currentAppFolderId = fId;
+
+      // 1. Register Subfolder (Root is implied)
       if (fId !== rootFolderId && !existingFolderIds.has(fId)) {
-        folderSheet.appendRow([fId, folder.getName(), "Auto-synced from Drive", new Date().toISOString()]);
-        syncedFolders.push(folder.getName());
-        currentAppFolderId = fId;
-      } else if (existingFolderIds.has(fId)) {
-        currentAppFolderId = fId;
+        newFolderRows.push([fId, folder.getName(), "Auto-synced from Drive", new Date().toISOString()]);
+        existingFolderIds.add(fId);
       }
 
-      // 2. Process Files
+      // 2. Process Files in current folder
       const files = folder.getFiles();
       while (files.hasNext()) {
         const file = files.next();
         const fileId = file.getId();
         if (existingDocIds.has(fileId) || fileId === dbId) continue;
-        if (file.getMimeType() === "application/vnd.google-apps.form") continue;
-
+        
         const docId = Utilities.getUuid();
-        docSheet.appendRow([
-          docId, file.getName(), currentAppFolderId || "", fileId,
-          file.getMimeType(), "uploaded", 0, new Date().toISOString()
+        newDocRows.push([
+          docId, 
+          file.getName(), 
+          (fId === rootFolderId ? "" : fId), 
+          fileId,
+          file.getMimeType(), 
+          "uploaded", 
+          0, 
+          new Date().toISOString()
         ]);
-        syncedFiles.push(file.getName());
+        existingDocIds.add(fileId);
       }
 
-      // 3. Process Subfolders
+      // 3. Recurse
       const subfolders = folder.getFolders();
       while (subfolders.hasNext()) {
-        crawl(subfolders.next(), currentAppFolderId);
+        crawl(subfolders.next(), fId);
       }
     }
 
     const rootFolder = DriveApp.getFolderById(rootFolderId);
     crawl(rootFolder, "");
 
+    // Bulk Write for Performance (v17.0 Performance Core)
+    if (newFolderRows.length > 0) {
+      folderSheet.getRange(folderSheet.getLastRow() + 1, 1, newFolderRows.length, newFolderRows[0].length).setValues(newFolderRows);
+    }
+    if (newDocRows.length > 0) {
+      docSheet.getRange(docSheet.getLastRow() + 1, 1, newDocRows.length, newDocRows[0].length).setValues(newDocRows);
+    }
+
     return jsonResp({ 
       status: "synced", 
-      newFiles: syncedFiles.length, 
-      newFolders: syncedFolders.length,
-      message: `Found ${syncedFiles.length} new files and ${syncedFolders.length} new folders.`
+      newFiles: newDocRows.length, 
+      newFolders: newFolderRows.length,
+      message: `Hyper-Sync complete: ${newDocRows.length} files and ${newFolderRows.length} subfolders indexed.`
     });
   } catch (err) {
-    Logger.log("Deep Sync Failed: " + err.message);
-    return jsonResp({ error: "Deep Sync failed: " + err.message });
+    Logger.log("Hyper-Sync Failed: " + err.message);
+    return jsonResp({ error: "Hyper-Sync failed: " + err.message });
   }
 }
 
